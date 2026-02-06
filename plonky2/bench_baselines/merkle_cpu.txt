@@ -1,0 +1,6 @@
+merkle-tree<GoldilocksField, PoseidonHash>/8192
+                        time:   [18.843 ms 18.843 ms 18.843 ms]
+merkle-tree<GoldilocksField, PoseidonHash>/16384
+                        time:   [33.297 ms 33.297 ms 33.297 ms]
+merkle-tree<GoldilocksField, PoseidonHash>/32768
+                        time:   [66.195 ms 66.195 ms 66.195 ms]

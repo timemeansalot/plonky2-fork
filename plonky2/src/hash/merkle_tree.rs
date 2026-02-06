@@ -29,10 +29,20 @@ use crate::hash::hash_types::RichField;
 #[cfg(feature = "cuda")]
 use crate::hash::hash_types::NUM_HASH_OUT_ELTS;
 use crate::hash::merkle_proofs::MerkleProof;
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", all(target_os = "macos", feature = "metal")))]
 use crate::plonk::config::HasherType;
 use crate::plonk::config::{GenericHashOut, Hasher};
 use crate::util::log2_strict;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use crate::gpu::metal::poseidon_interleaved::MetalRuntime;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use crate::field::goldilocks_field::GoldilocksField;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use crate::hash::poseidon::PoseidonHash;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use crate::hash::hash_types::HashOut;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use plonky2_field::types::Field;
 
 #[cfg(feature = "cuda")]
 pub static GPU_ID: Lazy<Arc<Mutex<u64>>> = Lazy::new(|| Arc::new(Mutex::new(0)));
@@ -591,8 +601,101 @@ fn fill_digests_buf_meta<F: RichField, H: Hasher<F>>(
     }
 }
 
+#[cfg(all(target_os = "macos", feature = "metal", not(feature = "cuda")))]
+fn fill_digests_buf_meta<F: RichField + 'static, H: Hasher<F>>(
+    digests_buf: &mut [MaybeUninit<H::Hash>],
+    cap_buf: &mut [MaybeUninit<H::Hash>],
+    leaves: &Vec<F>,
+    leaf_size: usize,
+    cap_height: usize,
+) {
+    use std::any::TypeId;
+
+    // Small inputs or non-Poseidon should stay on CPU.
+    if leaf_size <= H::HASH_SIZE / 8 || H::HASHER_TYPE == HasherType::Keccak {
+        fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
+        return;
+    }
+
+    if H::HASHER_TYPE != HasherType::Poseidon {
+        fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
+        return;
+    }
+
+    // Metal backend currently supports Goldilocks + Poseidon only.
+    if TypeId::of::<F>() != TypeId::of::<GoldilocksField>() {
+        fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
+        return;
+    }
+
+    // Convert leaves into Goldilocks and reshape to 2D.
+    let leaves_gl: Vec<GoldilocksField> = leaves
+        .iter()
+        .map(|x| GoldilocksField::from_canonical_u64(x.to_canonical_u64()))
+        .collect();
+    let mut leaves_2d: Vec<Vec<GoldilocksField>> = Vec::with_capacity(leaves_gl.len() / leaf_size);
+    for chunk in leaves_gl.chunks(leaf_size) {
+        leaves_2d.push(chunk.to_vec());
+    }
+
+    let tree = build_merkle_tree_metal(leaves_2d, cap_height);
+
+    // Safety: we only reach this path for Poseidon + Goldilocks. In this codebase,
+    // that implies H::Hash has the same layout as HashOut<GoldilocksField>.
+    if std::mem::size_of::<H::Hash>() != std::mem::size_of::<HashOut<GoldilocksField>>() {
+        fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
+        return;
+    }
+
+    for (dst, src) in digests_buf.iter_mut().zip(tree.digests.iter()) {
+        let val: H::Hash = unsafe { std::mem::transmute_copy(src) };
+        dst.write(val);
+    }
+    for (dst, src) in cap_buf.iter_mut().zip(tree.cap.0.iter()) {
+        let val: H::Hash = unsafe { std::mem::transmute_copy(src) };
+        dst.write(val);
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn build_merkle_tree_metal(
+    leaves: Vec<Vec<GoldilocksField>>,
+    cap_height: usize,
+) -> MerkleTree<GoldilocksField, PoseidonHash> {
+    // Select best available Metal implementation.
+    #[cfg(feature = "metal-bandwidth-opt")]
+    {
+        return MetalRuntime::new_merkle_tree_chunked(leaves, cap_height);
+    }
+    #[cfg(all(feature = "metal-optimized", not(feature = "metal-bandwidth-opt")))]
+    {
+        return MetalRuntime::new_merkle_tree_linear_threadgroup(leaves, cap_height);
+    }
+    #[cfg(all(
+        feature = "metal-linear-merkle",
+        not(any(feature = "metal-optimized", feature = "metal-bandwidth-opt"))
+    ))]
+    {
+        return MetalRuntime::new_merkle_tree_linear(leaves, cap_height);
+    }
+    #[cfg(all(
+        feature = "metal-threadgroup",
+        not(any(
+            feature = "metal-linear-merkle",
+            feature = "metal-optimized",
+            feature = "metal-bandwidth-opt"
+        ))
+    ))]
+    {
+        return MetalRuntime::new_merkle_tree_threadgroup(leaves, cap_height);
+    }
+
+    MetalRuntime::new_merkle_tree(leaves, cap_height)
+}
+
 #[cfg(all(
     not(feature = "cuda"),
+    not(feature = "metal"),
     not(all(target_feature = "avx2", target_feature = "avx512dq"))
 ))]
 fn fill_digests_buf_meta<F: RichField, H: Hasher<F>>(
@@ -605,7 +708,12 @@ fn fill_digests_buf_meta<F: RichField, H: Hasher<F>>(
     fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
 }
 
-#[cfg(all(target_feature = "avx2", target_feature = "avx512dq"))]
+#[cfg(all(
+    target_feature = "avx2",
+    target_feature = "avx512dq",
+    not(feature = "cuda"),
+    not(feature = "metal")
+))]
 fn fill_digests_buf_meta<F: RichField, H: Hasher<F>>(
     digests_buf: &mut [MaybeUninit<H::Hash>],
     cap_buf: &mut [MaybeUninit<H::Hash>],

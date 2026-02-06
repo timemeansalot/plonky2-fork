@@ -22,6 +22,12 @@ no_cuda = ["zeknox/no_cuda"]
 batch = []
 cuda_timing = []
 papi = []
+metal = ["dep:metal", "dep:objc", "dep:cocoa"]
+metal-threadgroup = ["metal"]
+metal-linear-merkle = ["metal"]
+metal-optimized = ["metal-linear-merkle"]
+metal-bandwidth-opt = ["metal"]
+metal-ntt = ["metal"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -39,6 +45,7 @@ unroll = { workspace = true }
 web-time = { version = "1.0.0", optional = true }
 once_cell = { version = "1.20.2" }
 papi-bindings = { version = "0.5.2" }
+lazy_static = "1.4.0"
 
 # Local dependencies
 plonky2_field = { version = "0.2.2", path = "../field", default-features = false }
@@ -49,6 +56,11 @@ dyn-clone = "1.0.17"
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.2", default-features = false, features = ["js"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.27", optional = true }
+objc = { version = "0.2", optional = true }
+cocoa = { version = "0.25", optional = true }
 
 [build-dependencies]
 bindgen = { version = "0.68.1" }
@@ -98,6 +110,10 @@ harness = false
 
 [[bench]]
 name = "reverse_index_bits"
+harness = false
+
+[[bench]]
+name = "poseidon_metal"
 harness = false
 
 # Display math equations properly in documentation

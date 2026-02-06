@@ -1,0 +1,46 @@
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> plonky2/src/plonk/circuit_data.rs:151:29
+    |
+151 |     pub fn generate_witness(&self, inputs: PartialWitness<F>) -> PartitionWitness<F> {
+    |                             ^^^^^ the lifetime is elided here    ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+151 |     pub fn generate_witness(&self, inputs: PartialWitness<F>) -> PartitionWitness<'_, F> {
+    |                                                                                   +++
+
+warning: `plonky2` (lib) generated 1 warning (run `cargo fix --lib -p plonky2` to apply 1 suggestion)
+    Finished `bench` profile [optimized] target(s) in 0.06s
+     Running benches/merkle.rs (/Users/fujie/coding/cysic/plonky/okx_fork/plonky2-fork/target/release/deps/merkle-fe835af7c2529130)
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/8192
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/8192: Warming up for 3.0000 s
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/8192: Collecting 10 samples in estimated 5.6315 s (330 iterations)
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/8192: Analyzing
+merkle-tree<GoldilocksField, PoseidonHash>/8192
+                        time:   [16.622 ms 16.664 ms 16.702 ms]
+                        change: [-2.7467% -1.7359% -0.8648%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/16384
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/16384: Warming up for 3.0000 s
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/16384: Collecting 10 samples in estimated 5.5636 s (165 iterations)
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/16384: Analyzing
+merkle-tree<GoldilocksField, PoseidonHash>/16384
+                        time:   [33.096 ms 33.307 ms 33.652 ms]
+                        change: [-3.4759% -1.0356% +1.4277%] (p = 0.48 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/32768
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/32768: Warming up for 3.0000 s
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/32768: Collecting 10 samples in estimated 7.2092 s (110 iterations)
+Benchmarking merkle-tree<GoldilocksField, PoseidonHash>/32768: Analyzing
+merkle-tree<GoldilocksField, PoseidonHash>/32768
+                        time:   [65.858 ms 67.131 ms 68.967 ms]
+                        change: [-1.0086% +0.4127% +2.2688%] (p = 0.68 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

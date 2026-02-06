@@ -16,3 +16,4 @@ docs/**bench**
 **/*/go-iden3-crypto/
 node_modules
 .vscode
+*.md

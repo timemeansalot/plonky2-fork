@@ -4,11 +4,16 @@
 # This script runs E2E proving benchmarks comparing true GPU vs CPU performance
 # Automatically detects OS and uses appropriate GPU backend (CUDA for Linux, Metal for macOS)
 #
-# Usage: ./auto_bench.sh [ROUNDS] [START] [END] [--cpu-only]
+# Usage: ./auto_bench.sh [ROUNDS] [START] [END] [--cpu-only] [--no-lde] [--hash-only] [--skip-cpu] [--cpu-runs N] [--poseidon-bench]
 #   ROUNDS    - Number of benchmark rounds (default: 3)
 #   START     - Starting log_size (default: 13)
 #   END       - Ending log_size (default: 18)
 #   --cpu-only - Run CPU-only benchmarks (skip GPU)
+#   --no-lde   - Skip LDE+Merkle benchmarks
+#   --hash-only - Run only Merkle hash benchmarks (skip E2E prove)
+#   --skip-cpu - Skip CPU benchmarks and use cached results
+#   --cpu-runs N - Number of times to run CPU merkle benchmark (default: 3)
+#   --poseidon-bench - Run poseidon leaf microbench (CPU + Metal linear leaf kernel)
 #
 # Examples:
 #   ./auto_bench.sh              # Use defaults
@@ -22,17 +27,51 @@ cd "$SCRIPT_DIR"
 
 # Check for --cpu-only flag
 CPU_ONLY=false
+SKIP_LDE=false
+HASH_ONLY=false
+SKIP_CPU=false
+CPU_RUNS=3
+POSEIDON_BENCH=false
 for arg in "$@"; do
     if [ "$arg" = "--cpu-only" ]; then
         CPU_ONLY=true
     fi
+    if [ "$arg" = "--no-lde" ]; then
+        SKIP_LDE=true
+    fi
+    if [ "$arg" = "--hash-only" ]; then
+        HASH_ONLY=true
+    fi
+    if [ "$arg" = "--skip-cpu" ]; then
+        SKIP_CPU=true
+    fi
+    if [ "$arg" = "--poseidon-bench" ]; then
+        POSEIDON_BENCH=true
+    fi
 done
 
-# Parse command line arguments (skip --cpu-only)
+# If poseidon microbench is requested, force hash-only and skip LDE/E2E.
+if [ "$POSEIDON_BENCH" = true ]; then
+    HASH_ONLY=true
+    SKIP_LDE=true
+fi
+
+# Parse command line arguments (skip flags)
 args=()
 for arg in "$@"; do
-    if [ "$arg" != "--cpu-only" ]; then
+    if [ "$arg" = "--cpu-runs" ]; then
+        continue
+    fi
+    if [ "$arg" != "--cpu-only" ] && [ "$arg" != "--no-lde" ] && [ "$arg" != "--hash-only" ] && [ "$arg" != "--skip-cpu" ] && [ "$arg" != "--poseidon-bench" ]; then
         args+=("$arg")
+    fi
+done
+
+# Extract --cpu-runs value if provided
+for ((i=1; i<=$#; i++)); do
+    if [ "${!i}" = "--cpu-runs" ]; then
+        j=$((i+1))
+        CPU_RUNS=${!j}
     fi
 done
 
@@ -57,10 +96,10 @@ case "$OS_TYPE" in
         GPU_IMPLEMENTED=true
         ;;
     Darwin*)
-        GPU_FEATURE="metal"
+        GPU_FEATURE="${PLONKY2_METAL_FEATURE:-metal-optimized}"
         GPU_ENV=""
         OS_NAME="macOS"
-        GPU_IMPLEMENTED=false  # Metal not yet implemented
+        GPU_IMPLEMENTED=true  # Metal implemented
         ;;
     *)
         echo -e "${RED}Error: Unsupported OS: $OS_TYPE${NC}"
@@ -88,10 +127,24 @@ echo -e "  GPU:    ${GREEN}$GPU_FEATURE${NC}"
 echo -e "  ROUNDS: ${GREEN}$ROUNDS${NC}"
 echo -e "  START:  ${GREEN}$START${NC}"
 echo -e "  END:    ${GREEN}$END${NC}"
+if [ "$SKIP_LDE" = true ]; then
+    echo -e "  LDE:    ${YELLOW}skipped${NC}"
+fi
+if [ "$HASH_ONLY" = true ]; then
+    echo -e "  MODE:   ${YELLOW}hash-only${NC}"
+fi
+if [ "$POSEIDON_BENCH" = true ]; then
+    echo -e "  EXTRA:  ${YELLOW}poseidon-bench${NC}"
+fi
+if [ "$SKIP_CPU" = true ]; then
+    echo -e "  CPU:    ${YELLOW}skipped (cached)${NC}"
+else
+    echo -e "  CPU runs: ${GREEN}$CPU_RUNS${NC}"
+fi
 echo ""
 
 # Handle Metal (not yet implemented)
-if [ "$GPU_FEATURE" = "metal" ] && [ "$GPU_IMPLEMENTED" = false ] && [ "$CPU_ONLY" = false ]; then
+if [[ "$GPU_FEATURE" == metal* ]] && [ "$GPU_IMPLEMENTED" = false ] && [ "$CPU_ONLY" = false ]; then
     echo -e "${YELLOW}WARNING: Metal GPU acceleration is not yet implemented.${NC}"
     echo -e "${YELLOW}The 'metal' feature is a placeholder for future development.${NC}"
     echo -e "${YELLOW}See metal_draft.md for the migration plan.${NC}"
@@ -123,6 +176,32 @@ if [ "$CPU_ONLY" = false ]; then
         --example bench_bn128 2>/dev/null
 fi
 
+# ========================================
+# Part 0: Poseidon Leaf Microbench
+# ========================================
+if [ "$POSEIDON_BENCH" = true ]; then
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}  Poseidon Leaf Microbench            ${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+
+    if [[ "$GPU_FEATURE" == metal* ]]; then
+        POSEIDON_FEATURE="${PLONKY2_POSEIDON_FEATURE:-metal-linear-merkle}"
+        if [ "$SKIP_CPU" = true ]; then
+            echo -e "${YELLOW}Running poseidon leaf bench (GPU only, features: ${POSEIDON_FEATURE})...${NC}"
+            env POSEIDON_BENCH_SKIP_CPU=1 cargo bench --bench=poseidon_metal --features=$POSEIDON_FEATURE 2>&1 | tee /tmp/plonky2_poseidon_leaf.txt
+        else
+            echo -e "${YELLOW}Running poseidon leaf bench (features: ${POSEIDON_FEATURE})...${NC}"
+            cargo bench --bench=poseidon_metal --features=$POSEIDON_FEATURE 2>&1 | tee /tmp/plonky2_poseidon_leaf.txt
+        fi
+        echo -e "${GREEN}Poseidon leaf bench complete!${NC}"
+        echo ""
+    else
+        echo -e "${YELLOW}Poseidon leaf bench is only supported on macOS Metal currently.${NC}"
+        echo ""
+    fi
+fi
+
 echo -e "${YELLOW}Building benchmarks (CPU version)...${NC}"
 cargo build --release \
     --example bench_e2e_prove \
@@ -130,43 +209,6 @@ cargo build --release \
 
 echo -e "${GREEN}Build complete!${NC}"
 echo ""
-
-# ========================================
-# Part 1: Criterion Benchmarks (Merkle & LDE)
-# ========================================
-if [ "$CPU_ONLY" = false ]; then
-    echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}  Part 1: Primitive Operations         ${NC}"
-    echo -e "${BLUE}  (Merkle Tree & LDE+Merkle)           ${NC}"
-    echo -e "${BLUE}========================================${NC}"
-    echo ""
-
-    echo -e "${YELLOW}Running Merkle Tree benchmark (CPU)...${NC}"
-    cargo bench --bench=merkle 2>&1 | tee "$MERKLE_CPU_FILE"
-    echo -e "${GREEN}Merkle CPU complete!${NC}"
-    echo ""
-
-    echo -e "${YELLOW}Running Merkle Tree benchmark (GPU with $GPU_FEATURE)...${NC}"
-    env $GPU_ENV cargo bench --bench=merkle --features=$GPU_FEATURE 2>&1 | tee "$MERKLE_GPU_FILE"
-    echo -e "${GREEN}Merkle GPU complete!${NC}"
-    echo ""
-
-    echo -e "${YELLOW}Running LDE+Merkle benchmark (CPU)...${NC}"
-    cargo bench --bench=lde 2>&1 | tee "$LDE_CPU_FILE"
-    echo -e "${GREEN}LDE CPU complete!${NC}"
-    echo ""
-
-    echo -e "${YELLOW}Running LDE+Merkle benchmark (GPU with $GPU_FEATURE)...${NC}"
-    env $GPU_ENV cargo bench --bench=lde --features=$GPU_FEATURE 2>&1 | tee "$LDE_GPU_FILE"
-    echo -e "${GREEN}LDE GPU complete!${NC}"
-    echo ""
-
-    # Display Criterion benchmark results
-    echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}  PRIMITIVE BENCHMARK RESULTS          ${NC}"
-    echo -e "${BLUE}========================================${NC}"
-    echo ""
-fi
 
 # Function to extract time from criterion output line
 # Input: "                        time:   [24.711 ms 26.693 ms 27.914 ms]"
@@ -185,6 +227,114 @@ to_ms() {
         else print $1
     }'
 }
+
+# Compute averaged CPU baseline from multiple runs.
+# Uses the median time (middle value) from each run and averages in ms.
+average_merkle_cpu_runs() {
+    local output_file=$1
+    shift
+    local run_files=("$@")
+
+    local current_bench=""
+    > "$output_file"
+
+    while IFS= read -r line; do
+        if [[ "$line" == merkle-tree* ]] && [[ "$line" != *Benchmarking* ]] && [[ "$line" != *Warming* ]] && [[ "$line" != *Collecting* ]] && [[ "$line" != *Analyzing* ]]; then
+            current_bench="$line"
+            echo "$current_bench" >> "$output_file"
+        elif [[ "$line" == *"time:"* ]] && [[ -n "$current_bench" ]]; then
+            local sum_ms=0
+            local count=0
+            for f in "${run_files[@]}"; do
+                local escaped_bench=$(echo "$current_bench" | sed 's/[[\.*^$()+?{|]/\\&/g')
+                local time_line=$(grep -A1 "^${escaped_bench}$" "$f" | grep "time:")
+                if [[ -n "$time_line" ]]; then
+                    local mid_time=$(extract_time "$time_line")
+                    local ms=$(to_ms "$mid_time")
+                    if [[ -n "$ms" ]]; then
+                        sum_ms=$(awk "BEGIN {printf \"%.6f\", $sum_ms + $ms}")
+                        count=$((count+1))
+                    fi
+                fi
+            done
+
+            if [[ "$count" -gt 0 ]]; then
+                local avg_ms=$(awk "BEGIN {printf \"%.3f\", $sum_ms / $count}")
+                printf "                        time:   [%s ms %s ms %s ms]\n" "$avg_ms" "$avg_ms" "$avg_ms" >> "$output_file"
+            else
+                printf "                        time:   [0.000 ms 0.000 ms 0.000 ms]\n" >> "$output_file"
+            fi
+            current_bench=""
+        fi
+    done < "${run_files[0]}"
+}
+
+# ========================================
+# Part 1: Criterion Benchmarks (Merkle & LDE)
+# ========================================
+if [ "$CPU_ONLY" = false ]; then
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}  Part 1: Primitive Operations         ${NC}"
+    echo -e "${BLUE}  (Merkle Tree & LDE+Merkle)           ${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+
+BASELINE_DIR="$SCRIPT_DIR/bench_baselines"
+MERKLE_CPU_CACHE="$BASELINE_DIR/merkle_cpu.txt"
+
+if [ "$SKIP_CPU" = false ]; then
+    mkdir -p "$BASELINE_DIR"
+    run_files=()
+    for run in $(seq 1 "$CPU_RUNS"); do
+        local_run_file="$BASELINE_DIR/merkle_cpu_run_${run}.txt"
+        run_files+=("$local_run_file")
+        echo -e "${YELLOW}Running Merkle Tree benchmark (CPU) [run ${run}/${CPU_RUNS}]...${NC}"
+        cargo bench --bench=merkle 2>&1 | tee "$local_run_file"
+    done
+    average_merkle_cpu_runs "$MERKLE_CPU_CACHE" "${run_files[@]}"
+    MERKLE_CPU_FILE="$MERKLE_CPU_CACHE"
+    echo -e "${GREEN}Merkle CPU complete! Averaged across ${CPU_RUNS} runs. Cached to ${MERKLE_CPU_CACHE}${NC}"
+    echo ""
+else
+    if [ -f "$MERKLE_CPU_CACHE" ]; then
+        MERKLE_CPU_FILE="$MERKLE_CPU_CACHE"
+        echo -e "${YELLOW}Using cached CPU results: ${MERKLE_CPU_CACHE}${NC}"
+        echo ""
+    else
+        echo -e "${RED}Error: CPU cache not found at ${MERKLE_CPU_CACHE}. Run without --skip-cpu first.${NC}"
+        exit 1
+    fi
+fi
+
+    echo -e "${YELLOW}Running Merkle Tree benchmark (GPU with $GPU_FEATURE)...${NC}"
+    env $GPU_ENV cargo bench --bench=merkle --features=$GPU_FEATURE 2>&1 | tee "$MERKLE_GPU_FILE"
+    echo -e "${GREEN}Merkle GPU complete!${NC}"
+    echo ""
+
+    if [ -f "$MERKLE_CPU_FILE" ] && [ -f "$MERKLE_GPU_FILE" ]; then
+        echo -e "${YELLOW}Speedup summary (CPU baseline vs GPU):${NC}"
+        BASELINE_FILE="$MERKLE_CPU_FILE" GPU_FILE="$MERKLE_GPU_FILE" "$SCRIPT_DIR/bench_speedup.sh"
+        echo ""
+    fi
+
+    if [ "$SKIP_LDE" = false ]; then
+        echo -e "${YELLOW}Running LDE+Merkle benchmark (CPU)...${NC}"
+        cargo bench --bench=lde 2>&1 | tee "$LDE_CPU_FILE"
+        echo -e "${GREEN}LDE CPU complete!${NC}"
+        echo ""
+
+        echo -e "${YELLOW}Running LDE+Merkle benchmark (GPU with $GPU_FEATURE)...${NC}"
+        env $GPU_ENV cargo bench --bench=lde --features=$GPU_FEATURE 2>&1 | tee "$LDE_GPU_FILE"
+        echo -e "${GREEN}LDE GPU complete!${NC}"
+        echo ""
+    fi
+
+    # Display Criterion benchmark results
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}  PRIMITIVE BENCHMARK RESULTS          ${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+fi
 
 # Function to display Merkle tree benchmark results
 display_merkle_comparison() {
@@ -277,20 +427,24 @@ display_lde_comparison() {
 
 if [ "$CPU_ONLY" = false ]; then
     display_merkle_comparison "$MERKLE_GPU_FILE" "$MERKLE_CPU_FILE"
-    display_lde_comparison "$LDE_GPU_FILE" "$LDE_CPU_FILE"
+    if [ "$SKIP_LDE" = false ]; then
+        display_lde_comparison "$LDE_GPU_FILE" "$LDE_CPU_FILE"
+    fi
 fi
 
-# ========================================
-# Part 2: E2E Prove Benchmarks
-# ========================================
-echo -e "${BLUE}========================================${NC}"
-if [ "$CPU_ONLY" = true ]; then
-    echo -e "${BLUE}  CPU-Only Benchmarks                  ${NC}"
-else
-    echo -e "${BLUE}  Part 2: End-to-End Proving           ${NC}"
+if [ "$HASH_ONLY" = false ]; then
+    # ========================================
+    # Part 2: E2E Prove Benchmarks
+    # ========================================
+    echo -e "${BLUE}========================================${NC}"
+    if [ "$CPU_ONLY" = true ]; then
+        echo -e "${BLUE}  CPU-Only Benchmarks                  ${NC}"
+    else
+        echo -e "${BLUE}  Part 2: End-to-End Proving           ${NC}"
+    fi
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
 fi
-echo -e "${BLUE}========================================${NC}"
-echo ""
 
 # Function to run GPU benchmark and save results
 run_gpu_benchmark() {
@@ -316,29 +470,31 @@ run_cpu_benchmark() {
     echo -e "${GREEN}$name (CPU) complete!${NC}"
 }
 
-# Run all E2E benchmarks
-echo -e "${BLUE}--- Running Goldilocks Benchmarks ---${NC}"
-if [ "$CPU_ONLY" = false ]; then
-    run_gpu_benchmark "Goldilocks" "$GOLD_GPU_FILE" "bench_e2e_prove"
-fi
-run_cpu_benchmark "Goldilocks" "$GOLD_CPU_FILE" "bench_e2e_prove"
+if [ "$HASH_ONLY" = false ]; then
+    # Run all E2E benchmarks
+    echo -e "${BLUE}--- Running Goldilocks Benchmarks ---${NC}"
+    if [ "$CPU_ONLY" = false ]; then
+        run_gpu_benchmark "Goldilocks" "$GOLD_GPU_FILE" "bench_e2e_prove"
+    fi
+    run_cpu_benchmark "Goldilocks" "$GOLD_CPU_FILE" "bench_e2e_prove"
 
-echo ""
-echo -e "${BLUE}--- Running BN128 Benchmarks ---${NC}"
-if [ "$CPU_ONLY" = false ]; then
-    run_gpu_benchmark "BN128" "$BN128_GPU_FILE" "bench_bn128"
-fi
-run_cpu_benchmark "BN128" "$BN128_CPU_FILE" "bench_bn128"
+    echo ""
+    echo -e "${BLUE}--- Running BN128 Benchmarks ---${NC}"
+    if [ "$CPU_ONLY" = false ]; then
+        run_gpu_benchmark "BN128" "$BN128_GPU_FILE" "bench_bn128"
+    fi
+    run_cpu_benchmark "BN128" "$BN128_CPU_FILE" "bench_bn128"
 
-echo ""
-echo -e "${BLUE}========================================${NC}"
-if [ "$CPU_ONLY" = true ]; then
-    echo -e "${BLUE}      CPU BENCHMARK RESULTS            ${NC}"
-else
-    echo -e "${BLUE}      E2E BENCHMARK RESULTS            ${NC}"
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    if [ "$CPU_ONLY" = true ]; then
+        echo -e "${BLUE}      CPU BENCHMARK RESULTS            ${NC}"
+    else
+        echo -e "${BLUE}      E2E BENCHMARK RESULTS            ${NC}"
+    fi
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
 fi
-echo -e "${BLUE}========================================${NC}"
-echo ""
 
 # Function to display comparison table
 display_comparison() {
@@ -405,12 +561,14 @@ display_cpu_only() {
 }
 
 # Display results
-if [ "$CPU_ONLY" = true ]; then
-    display_cpu_only "Goldilocks (64-bit field)" "$GOLD_CPU_FILE"
-    display_cpu_only "BN128 (254-bit hashing)" "$BN128_CPU_FILE"
-else
-    display_comparison "Goldilocks (64-bit field)" "$GOLD_GPU_FILE" "$GOLD_CPU_FILE"
-    display_comparison "BN128 (254-bit hashing)" "$BN128_GPU_FILE" "$BN128_CPU_FILE"
+if [ "$HASH_ONLY" = false ]; then
+    if [ "$CPU_ONLY" = true ]; then
+        display_cpu_only "Goldilocks (64-bit field)" "$GOLD_CPU_FILE"
+        display_cpu_only "BN128 (254-bit hashing)" "$BN128_CPU_FILE"
+    else
+        display_comparison "Goldilocks (64-bit field)" "$GOLD_GPU_FILE" "$GOLD_CPU_FILE"
+        display_comparison "BN128 (254-bit hashing)" "$BN128_GPU_FILE" "$BN128_CPU_FILE"
+    fi
 fi
 
 echo -e "${BLUE}========================================${NC}"
@@ -422,20 +580,26 @@ if [ "$CPU_ONLY" = true ]; then
     echo "See metal_draft.md for the Metal migration plan."
     echo ""
     echo "Results saved to:"
-    echo "  - $GOLD_CPU_FILE"
-    echo "  - $BN128_CPU_FILE"
+    if [ "$HASH_ONLY" = false ]; then
+        echo "  - $GOLD_CPU_FILE"
+        echo "  - $BN128_CPU_FILE"
+    fi
 else
     echo "Results saved to:"
     echo "  Primitive benchmarks:"
     echo "    - $MERKLE_CPU_FILE"
     echo "    - $MERKLE_GPU_FILE"
-    echo "    - $LDE_CPU_FILE"
-    echo "    - $LDE_GPU_FILE"
-    echo "  E2E benchmarks:"
-    echo "    - $GOLD_GPU_FILE"
-    echo "    - $GOLD_CPU_FILE"
-    echo "    - $BN128_GPU_FILE"
-    echo "    - $BN128_CPU_FILE"
+    if [ "$SKIP_LDE" = false ]; then
+        echo "    - $LDE_CPU_FILE"
+        echo "    - $LDE_GPU_FILE"
+    fi
+    if [ "$HASH_ONLY" = false ]; then
+        echo "  E2E benchmarks:"
+        echo "    - $GOLD_GPU_FILE"
+        echo "    - $GOLD_CPU_FILE"
+        echo "    - $BN128_GPU_FILE"
+        echo "    - $BN128_CPU_FILE"
+    fi
 fi
 echo ""
 echo -e "${GREEN}Benchmark complete!${NC}"
