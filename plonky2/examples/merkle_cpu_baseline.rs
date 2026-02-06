@@ -34,6 +34,11 @@ fn main() {
     println!("Output: {}", out_path.display());
     println!("leaf_size(s): {:?}, cap_height: {}", LEAF_SIZES, CAP_HEIGHT);
     println!("leaf_counts: {:?}, runs: {}", LEAF_COUNTS, RUNS);
+    println!(
+        "CPU SIMD: avx2={}, avx512dq={}",
+        cfg!(target_feature = "avx2"),
+        cfg!(target_feature = "avx512dq")
+    );
     println!();
 
     for &leaf_size in LEAF_SIZES {
