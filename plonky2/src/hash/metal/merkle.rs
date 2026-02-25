@@ -6,10 +6,7 @@ use plonky2_field::goldilocks_field::GoldilocksField;
 use crate::hash::hash_types::HashOut;
 use crate::hash::metal::runtime::MetalRuntime;
 use crate::hash::metal::threadgroup_config::get_merkle_threadgroup_size;
-use crate::hash::metal::utils::{
-    from_buf_raw, get_node_hash_index_in_digests, get_size_for_count, LinearUniforms,
-    POSEIDON_CONST_SIZE,
-};
+use crate::hash::metal::utils::{from_buf_raw, get_size_for_count, LinearUniforms, POSEIDON_CONST_SIZE};
 
 impl MetalRuntime {
     /// Hash merkle tree with linear layout + threadgroup optimization, returning digests and caps.
@@ -224,7 +221,18 @@ impl MetalRuntime {
         (digests, caps)
     }
 
-    /// Convert digests from linear layout to plonky2's recursive layout format.
+    /// Convert GPU linear-layout digests to plonky2-fork's level-order (BFS) layout.
+    ///
+    /// plonky2-fork stores each subtree's nodes in level-order starting from the top:
+    ///   - root's children (2 nodes) at positions 0..1
+    ///   - next level (4 nodes) at positions 2..5
+    ///   - ...
+    ///   - leaf hashes at positions (n-2)..(2n-3)  (where n = subtree_leaves_len)
+    ///
+    /// The GPU linear layout stores each level contiguously within each subtree:
+    ///   level l, node i → GPU pos = (n >> l) - 1 + i  (within subtree)
+    /// The fork CPU layout uses:
+    ///   level l, node i → CPU pos = (n >> l) - 2 + i  (within subtree)
     pub(crate) fn convert_linear_to_plonky2_digests(
         &self,
         digests_buffer: &Buffer,
@@ -235,51 +243,40 @@ impl MetalRuntime {
     ) -> Vec<HashOut<GoldilocksField>> {
         let num_caps = 1usize << cap_height;
         let num_layers = tree_height - cap_height;
-        let leaf_count = 1usize << tree_height;
 
-        // Total digests in plonky2 format
-        let total_tree_hashes = leaf_count * 2 - 1;
-        let total_digests = total_tree_hashes - (num_caps * 2 - 1);
-        let tree_length = total_digests >> cap_height;
+        // plonky2-fork CPU subtree length = 2*(subtree_leaves_len - 1) — does NOT include root
+        let subtree_digests_len_cpu = 2 * (subtree_leaves_len - 1);
+        let total_digests = subtree_digests_len_cpu * num_caps;
 
         let mut result = vec![HashOut::default(); total_digests];
 
-        // Read raw linear buffer
         let linear_ptr = digests_buffer.contents() as *const HashOut<GoldilocksField>;
         let linear_digests: &[HashOut<GoldilocksField>] = unsafe {
             std::slice::from_raw_parts(linear_ptr, subtree_digests_len * num_caps)
         };
 
-        // Map from linear layout to recursive layout; for each subtree:
         for subtree_idx in 0..num_caps {
-            let subtree_base = subtree_idx * subtree_digests_len;
+            let gpu_base = subtree_idx * subtree_digests_len;
+            let cpu_base = subtree_idx * subtree_digests_len_cpu;
 
-            // Map leaves (level 0)
+            // Level 0: leaf hashes
+            // GPU position: gpu_base + (subtree_leaves_len - 1) + leaf_idx
+            // CPU position: cpu_base + (subtree_leaves_len - 2) + leaf_idx
             for leaf_idx in 0..subtree_leaves_len {
-                let linear_idx =
-                    subtree_base + (subtree_digests_len - subtree_leaves_len) + leaf_idx;
-                let global_leaf_idx = subtree_idx * subtree_leaves_len + leaf_idx;
-                let recursive_idx =
-                    get_node_hash_index_in_digests(num_layers, tree_length, 0, global_leaf_idx);
-                result[recursive_idx] = linear_digests[linear_idx];
+                let gpu_idx = gpu_base + (subtree_leaves_len - 1) + leaf_idx;
+                let cpu_idx = cpu_base + (subtree_leaves_len - 2) + leaf_idx;
+                result[cpu_idx] = linear_digests[gpu_idx];
             }
 
-            // Map internal nodes (level 1 to num_layers-1)
+            // Levels 1..num_layers-1: internal nodes
+            // GPU position: gpu_base + (nodes_at_level - 1) + node_idx
+            // CPU position: cpu_base + (nodes_at_level - 2) + node_idx
             for level in 1..num_layers {
                 let nodes_at_level = subtree_leaves_len >> level;
                 for node_idx in 0..nodes_at_level {
-                    // level_start avoids unsigned underflow by using simplified form
-                    let level_start = (subtree_leaves_len >> level) - 1;
-                    let linear_idx = subtree_base + level_start + node_idx;
-
-                    let global_node_idx = subtree_idx * nodes_at_level + node_idx;
-                    let recursive_idx = get_node_hash_index_in_digests(
-                        num_layers,
-                        tree_length,
-                        level,
-                        global_node_idx,
-                    );
-                    result[recursive_idx] = linear_digests[linear_idx];
+                    let gpu_idx = gpu_base + (nodes_at_level - 1) + node_idx;
+                    let cpu_idx = cpu_base + (nodes_at_level - 2) + node_idx;
+                    result[cpu_idx] = linear_digests[gpu_idx];
                 }
             }
         }
