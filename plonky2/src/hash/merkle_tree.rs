@@ -1339,6 +1339,8 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn test_proof_with_metal_poseidon() -> Result<()> {
+        use std::time::Instant;
+
         use crate::gates::noop::NoopGate;
         use crate::iop::witness::PartialWitness;
         use crate::plonk::circuit_builder::CircuitBuilder;
@@ -1359,8 +1361,116 @@ mod tests {
         }
 
         let pw = PartialWitness::new();
+        let t_build = Instant::now();
         let data = builder.build::<C>();
+        println!("[Metal] build: {:?}", t_build.elapsed());
+
+        let t_prove = Instant::now();
         let proof = data.prove(pw)?;
+        println!("[Metal] prove: {:?}", t_prove.elapsed());
+
+        data.verify(proof)
+    }
+
+    #[test]
+    fn test_proof_cpu_poseidon() -> Result<()> {
+        use std::time::Instant;
+
+        use crate::gates::noop::NoopGate;
+        use crate::iop::witness::PartialWitness;
+        use crate::plonk::circuit_builder::CircuitBuilder;
+        use crate::plonk::circuit_data::CircuitConfig;
+
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        // Same circuit as the Metal test for a fair comparison
+        let num_gates = (1 << 12) + 1;
+        for _ in 0..num_gates {
+            builder.add_gate(NoopGate, vec![]);
+        }
+
+        let pw = PartialWitness::new();
+        let t_build = Instant::now();
+        let data = builder.build::<C>();
+        println!("[CPU]   build: {:?}", t_build.elapsed());
+
+        let t_prove = Instant::now();
+        let proof = data.prove(pw)?;
+        println!("[CPU]   prove: {:?}", t_prove.elapsed());
+
+        data.verify(proof)
+    }
+
+    /// Degree-17 circuit: (1<<16)+1 NoopGates → 2^17 rows → tree_height 20 (max Metal window).
+    #[test]
+    fn test_proof_degree17_timing() -> Result<()> {
+        use std::time::Instant;
+
+        use crate::gates::noop::NoopGate;
+        use crate::iop::witness::PartialWitness;
+        use crate::plonk::circuit_builder::CircuitBuilder;
+        use crate::plonk::circuit_data::CircuitConfig;
+
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        // (1<<16)+1 = 65537 gates → degree 17 → tree_height 20 → Metal active (max range)
+        for _ in 0..(1 << 16) + 1 {
+            builder.add_gate(NoopGate, vec![]);
+        }
+
+        let pw = PartialWitness::new();
+        let t_build = Instant::now();
+        let data = builder.build::<C>();
+        println!("degree17 build: {:?}", t_build.elapsed());
+
+        let t_prove = Instant::now();
+        let proof = data.prove(pw)?;
+        println!("degree17 prove: {:?}", t_prove.elapsed());
+
+        data.verify(proof)
+    }
+
+    /// Degree-19 circuit: (1<<18)+1 NoopGates → 2^19 rows → tree_height 22 (above Metal window).
+    #[test]
+    fn test_proof_degree19_timing() -> Result<()> {
+        use std::time::Instant;
+
+        use crate::gates::noop::NoopGate;
+        use crate::iop::witness::PartialWitness;
+        use crate::plonk::circuit_builder::CircuitBuilder;
+        use crate::plonk::circuit_data::CircuitConfig;
+
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        // (1<<18)+1 = 262145 gates → degree 19 → tree_height 22 → Metal falls back to CPU
+        for _ in 0..(1 << 18) + 1 {
+            builder.add_gate(NoopGate, vec![]);
+        }
+
+        let pw = PartialWitness::new();
+        let t_build = Instant::now();
+        let data = builder.build::<C>();
+        println!("degree19 build: {:?}", t_build.elapsed());
+
+        let t_prove = Instant::now();
+        let proof = data.prove(pw)?;
+        println!("degree19 prove: {:?}", t_prove.elapsed());
+
         data.verify(proof)
     }
 }
