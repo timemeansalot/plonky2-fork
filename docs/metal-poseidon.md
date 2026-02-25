@@ -164,15 +164,43 @@ RUSTFLAGS="-Ctarget-cpu=native" cargo test --release -p plonky2 \
 > - `--test-threads=1` — prevents parallel test runs from competing for CPU threads
 > - `RUSTFLAGS="-Ctarget-cpu=native"` — enables SIMD/AVX on the CPU path for a fair comparison
 
+### Criterion benchmark (`cargo bench`)
+
+`plonky2/benches/prove.rs` is a proper [Criterion](https://crates.io/crates/criterion) benchmark
+that runs degrees 13 and 17 with statistical analysis (confidence intervals, change detection).
+
+```bash
+# Step 1 — save CPU baseline
+RUSTFLAGS="-Ctarget-cpu=native" cargo bench --bench prove -- --save-baseline cpu
+
+# Step 2 — run Metal and compare against saved baseline
+RUSTFLAGS="-Ctarget-cpu=native" cargo bench --features metal --bench prove -- --baseline cpu
+```
+
+Criterion writes an HTML report to `target/criterion/prove/` showing per-degree speedup
+with confidence intervals. To run without a baseline comparison:
+
+```bash
+RUSTFLAGS="-Ctarget-cpu=native" cargo bench --bench prove
+RUSTFLAGS="-Ctarget-cpu=native" cargo bench --features metal --bench prove
+```
+
+Approximate times: degree 13 takes ~35 s total; degree 17 takes ~5 min total.
+
 ---
 
 ## Benchmark Results (Apple M-series)
 
-| Circuit | CPU prove | Metal prove | Speedup |
-|---------|-----------|-------------|---------|
-| degree 13 | 284 ms | 262 ms | +8% |
-| degree 17 | 5.65 s | 5.70 s | ~0% |
-| degree 19 | 196.7 s | 126.6 s | **+55%** |
+Numbers from `cargo bench` (Criterion, 20 samples @ degree 13, 10 samples @ degree 17):
+
+| Circuit | CPU prove | Metal prove | Speedup | p-value |
+|---------|-----------|-------------|---------|---------|
+| degree 13 | 292 ms | 243 ms | **−17%** | < 0.05 |
+| degree 17 | 5.32 s | 4.87 s | **−8.5%** | 0.01 |
+| degree 19 | ~197 s | ~127 s | **~+55%** | single-shot[^1] |
+
+[^1]: Degree 19 is excluded from the Criterion bench (>2 min/iteration); the figure
+comes from `test_proof_degree19_timing` single-shot runs and is subject to thermal noise.
 
 **Why degree 17 shows almost no gain:**
 Merkle tree building is a small fraction of total prove time at this size; FFT/NTT
@@ -200,8 +228,7 @@ initial commitments still run on CPU.
 ## Potential Next Steps
 
 - **Extend the routing window to tree_height 22** — would activate Metal for the degree-19
-  initial oracle trees. Requires handling ~256 MB digest buffers; feasible on M-series
-  unified memory but untested.
+  initial oracle trees. Requires handling ~4.5 GB digest buffers; tested and reverted
+  (Metal overhead exceeds gain at that size).
 - **GPU NTT/FFT** — the remaining bottleneck for degree ≤17; already prototyped in the
   original `plonky2-metal-demo` (`metal-ntt` feature).
-- **Merge to main** — open a PR from `feature/metal-poseidon`.
