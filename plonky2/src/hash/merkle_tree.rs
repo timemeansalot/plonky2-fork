@@ -1330,4 +1330,37 @@ mod tests {
 
         Ok(())
     }
+
+    /// End-to-end proof generation and verification exercising the Metal GPU path.
+    ///
+    /// Uses ~4097 NoopGates to force a circuit of degree ~2^13.  With the default
+    /// rate_bits=3, the FRI polynomial oracle has 2^16 evaluations whose Merkle trees
+    /// have height 16 — comfortably inside the Metal routing window (13–20).
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_proof_with_metal_poseidon() -> Result<()> {
+        use crate::gates::noop::NoopGate;
+        use crate::iop::witness::PartialWitness;
+        use crate::plonk::circuit_builder::CircuitBuilder;
+        use crate::plonk::circuit_data::CircuitConfig;
+
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+
+        let config = CircuitConfig::standard_recursion_config();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        // (1 << 12) + 1 = 4097 gates → circuit degree ~2^13
+        // FRI oracle tree height = 13 + rate_bits(3) = 16 → Metal GPU path active
+        let num_gates = (1 << 12) + 1;
+        for _ in 0..num_gates {
+            builder.add_gate(NoopGate, vec![]);
+        }
+
+        let pw = PartialWitness::new();
+        let data = builder.build::<C>();
+        let proof = data.prove(pw)?;
+        data.verify(proof)
+    }
 }
