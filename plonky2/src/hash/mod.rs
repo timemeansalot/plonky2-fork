@@ -2,6 +2,8 @@
 //! as well as specific hash functions implementation.
 
 mod arch;
+#[cfg(feature = "metal")]
+pub(crate) mod metal;
 pub mod hash_types;
 pub mod hashing;
 pub mod keccak;
