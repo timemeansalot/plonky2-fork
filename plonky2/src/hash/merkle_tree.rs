@@ -1239,4 +1239,23 @@ mod tests {
 
         Ok(())
     }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_merkle_trees_metal_poseidon_g64() -> Result<()> {
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+
+        // 2^14 = 16384 leaves — above GPU threshold (2^13), hits Metal path
+        let log_n = 14;
+        let n = 1 << log_n;
+        let leaves = random_data::<F>(n, 7);
+
+        // verify_all_leaves builds the tree via new_from_2d → fill_digests_buf_meta
+        // (which routes to Metal when feature = "metal") then verifies every proof.
+        verify_all_leaves::<F, C, D>(leaves, 1)?;
+
+        Ok(())
+    }
 }
