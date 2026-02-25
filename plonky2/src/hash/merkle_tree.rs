@@ -29,6 +29,10 @@ use crate::hash::hash_types::NUM_HASH_OUT_ELTS;
 use crate::hash::merkle_proofs::MerkleProof;
 #[cfg(feature = "cuda")]
 use crate::plonk::config::HasherType;
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+use metal::objc::rc::autoreleasepool;
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+use plonky2_field::goldilocks_field::GoldilocksField;
 use crate::plonk::config::{GenericHashOut, Hasher};
 use crate::util::log2_strict;
 
@@ -452,7 +456,7 @@ fn fill_digests_buf_meta<F: RichField, H: Hasher<F>>(
     }
 }
 
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
 fn fill_digests_buf_meta<F: RichField, H: Hasher<F>>(
     digests_buf: &mut [MaybeUninit<H::Hash>],
     cap_buf: &mut [MaybeUninit<H::Hash>],
@@ -461,6 +465,74 @@ fn fill_digests_buf_meta<F: RichField, H: Hasher<F>>(
     cap_height: usize,
 ) {
     fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
+}
+
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+fn fill_digests_buf_meta<F: RichField, H: Hasher<F>>(
+    digests_buf: &mut [MaybeUninit<H::Hash>],
+    cap_buf: &mut [MaybeUninit<H::Hash>],
+    leaves: &Vec<F>,
+    leaf_size: usize,
+    cap_height: usize,
+) {
+    fill_digests_buf_metal::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
+}
+
+#[cfg(all(feature = "metal", not(feature = "cuda")))]
+fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
+    digests_buf: &mut [MaybeUninit<H::Hash>],
+    cap_buf: &mut [MaybeUninit<H::Hash>],
+    leaves: &Vec<F>,
+    leaf_size: usize,
+    cap_height: usize,
+) {
+    use crate::hash::metal::{tracking::track_deallocation, RUNTIME};
+    use crate::plonk::config::HasherType;
+
+    let leaf_count = leaves.len() / leaf_size;
+    let tree_height = log2_strict(leaf_count);
+
+    // GPU path is only valid for Poseidon/Goldilocks.
+    // For all other hashers, fall through to CPU.
+    if H::HASHER_TYPE != HasherType::Poseidon {
+        fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
+        return;
+    }
+
+    // All-cap trees have no internal digests; CPU handles them directly.
+    // Small trees: Metal dispatch overhead exceeds compute benefit below 2^13 leaves.
+    // Large trees: memory bandwidth saturation on M4 above 2^20 leaves.
+    if cap_height == tree_height || tree_height < 13 || tree_height > 20 {
+        fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
+        return;
+    }
+
+    // Safety: when H::HASHER_TYPE == Poseidon, F = GoldilocksField (u64 newtype).
+    // Both have identical representation, so the pointer cast is valid.
+    let leaves_gl: &[GoldilocksField] = unsafe {
+        std::slice::from_raw_parts(leaves.as_ptr() as *const GoldilocksField, leaves.len())
+    };
+
+    let (gpu_digests, gpu_caps) = autoreleasepool(|| {
+        let leaves_buf = RUNTIME.alloc_with_data_tracked(leaves_gl);
+        let result = RUNTIME.hash_merkle_tree_linear_threadgroup_buf_ho(
+            leaves_buf.into_inner_untracked(),
+            tree_height,
+            leaf_size,
+            cap_height,
+        );
+        track_deallocation(leaves_gl.len() * std::mem::size_of::<GoldilocksField>());
+        result
+    });
+
+    // Safety: HashOut<GoldilocksField> and H::Hash have identical memory layout
+    // when H::HASHER_TYPE == Poseidon (both are [u64; 4]).
+    for (dst, src) in digests_buf.iter_mut().zip(gpu_digests.iter()) {
+        dst.write(unsafe { *(src as *const _ as *const H::Hash) });
+    }
+    for (dst, src) in cap_buf.iter_mut().zip(gpu_caps.iter()) {
+        dst.write(unsafe { *(src as *const _ as *const H::Hash) });
+    }
 }
 
 impl<F: RichField, H: Hasher<F>> MerkleTree<F, H> {
