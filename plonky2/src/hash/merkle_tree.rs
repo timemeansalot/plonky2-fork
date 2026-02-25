@@ -501,7 +501,9 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
 
     // All-cap trees have no internal digests; CPU handles them directly.
     // Small trees: Metal dispatch overhead exceeds compute benefit below 2^13 leaves.
-    // Large trees: memory bandwidth saturation on M4 above 2^20 leaves.
+    // Large trees: above tree_height 20 the leaves buffer (leaf_count * leaf_size * 8B)
+    // exceeds ~1 GB; Metal buffer allocation + transfer overhead outweighs GPU gains,
+    // and Rayon-parallel CPU hashing is faster for these sizes.
     if cap_height == tree_height || tree_height < 13 || tree_height > 20 {
         fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
         return;
