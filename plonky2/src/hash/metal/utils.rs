@@ -16,6 +16,23 @@ pub struct LinearUniforms {
     pub grid_width: u32,
 }
 
+/// Uniforms for coalesced bandwidth-optimized kernels.
+/// Must match `CoalescedUniforms` in `poseidon_merkle_hasher_coalesced.metal`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CoalescedUniforms {
+    pub level: u32,
+    pub subtree_digests_len: u32,
+    pub subtree_leaves_len: u32,
+    pub leaf_size: u32,
+    pub leaf_count: u32,
+    pub subtree_count: u32,
+    pub nodes_per_subtree: u32,
+    pub nodes_per_dispatch: u32,
+    pub dispatch_offset: u32,
+    pub enable_counters: u32,
+}
+
 /// Poseidon threadgroup memory constants (must match shader).
 pub const POSEIDON_RC_SIZE: usize = 360 * std::mem::size_of::<u64>(); // 2880 bytes
 pub const POSEIDON_MDS_SIZE: usize = 12 * std::mem::size_of::<i64>(); // 96 bytes
@@ -66,4 +83,19 @@ pub fn get_node_hash_index_in_digests(
     let siblings_index = (pair_index << (level + 1)) + (1 << level) - 1;
     let d_index = 2 * siblings_index + parity;
     d_index + (tree_index * tree_length)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_coalesced_uniforms_size() {
+        assert_eq!(std::mem::size_of::<CoalescedUniforms>(), 40);
+    }
+
+    #[test]
+    fn test_linear_uniforms_size() {
+        assert_eq!(std::mem::size_of::<LinearUniforms>(), 28);
+    }
 }
