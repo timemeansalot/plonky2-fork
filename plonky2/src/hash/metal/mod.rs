@@ -3,7 +3,9 @@
 //! Provides `fill_digests_buf_metal`, which is called from `merkle_tree.rs` when
 //! the `metal` feature is enabled and CUDA is not.
 //!
-//! Only accelerates Poseidon/Goldilocks trees with 2^13–2^20 leaves.
+//! Only accelerates Poseidon/Goldilocks trees with 2^13+ leaves.
+//! Trees with 2^13–2^20 leaves use the linear+threadgroup shader;
+//! trees with 2^21+ leaves use the coalesced bandwidth-optimized shader.
 //! All other cases fall through to the CPU implementation.
 
 pub(crate) mod buffer_pool;

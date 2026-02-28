@@ -501,10 +501,7 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
 
     // All-cap trees have no internal digests; CPU handles them directly.
     // Small trees: Metal dispatch overhead exceeds compute benefit below 2^13 leaves.
-    // Large trees: above tree_height 20 the leaves buffer (leaf_count * leaf_size * 8B)
-    // exceeds ~1 GB; Metal buffer allocation + transfer overhead outweighs GPU gains,
-    // and Rayon-parallel CPU hashing is faster for these sizes.
-    if cap_height == tree_height || tree_height < 13 || tree_height > 20 {
+    if cap_height == tree_height || tree_height < 13 {
         fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
         return;
     }
@@ -515,14 +512,26 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
         std::slice::from_raw_parts(leaves.as_ptr() as *const GoldilocksField, leaves.len())
     };
 
+    // Route based on tree size:
+    // - tree_height >= 21: coalesced shader (2D dispatch, bandwidth-optimized)
+    // - tree_height 13..=20: linear+threadgroup shader (1D dispatch)
     let (gpu_digests, gpu_caps) = autoreleasepool(|| {
         let leaves_buf = RUNTIME.alloc_with_data_tracked(leaves_gl);
-        let result = RUNTIME.hash_merkle_tree_linear_threadgroup_buf_ho(
-            leaves_buf.into_inner_untracked(),
-            tree_height,
-            leaf_size,
-            cap_height,
-        );
+        let result = if tree_height >= 21 {
+            RUNTIME.hash_merkle_tree_coalesced_buf_ho(
+                leaves_buf.into_inner_untracked(),
+                tree_height,
+                leaf_size,
+                cap_height,
+            )
+        } else {
+            RUNTIME.hash_merkle_tree_linear_threadgroup_buf_ho(
+                leaves_buf.into_inner_untracked(),
+                tree_height,
+                leaf_size,
+                cap_height,
+            )
+        };
         track_deallocation(leaves_gl.len() * std::mem::size_of::<GoldilocksField>());
         result
     });
