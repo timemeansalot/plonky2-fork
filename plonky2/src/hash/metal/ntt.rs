@@ -519,6 +519,7 @@ impl MetalNTT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plonky2_field::types::Field64;
 
     #[test]
     fn test_pow_mod() {
@@ -558,5 +559,184 @@ mod tests {
             r
         };
         assert_eq!(omega, expected);
+    }
+
+    // ---- NTT / INTT / LDE correctness tests ----
+
+    fn reverse_bits_usize(x: usize, bits: usize) -> usize {
+        let mut result = 0;
+        let mut val = x;
+        for _ in 0..bits {
+            result = (result << 1) | (val & 1);
+            val >>= 1;
+        }
+        result
+    }
+
+    /// Compare Metal NTT against CPU FFT at a given size.
+    /// CPU FFT returns natural order; Metal NTT may return bit-reversed order.
+    /// We try both orderings and use whichever matches.
+    fn test_ntt_at_size(log_n: usize) {
+        use plonky2_field::fft::fft;
+        use plonky2_field::polynomial::PolynomialCoeffs;
+
+        let n = 1usize << log_n;
+        let coeffs: Vec<GoldilocksField> = (0..n)
+            .map(|i| GoldilocksField::from_canonical_u64(i as u64 % GoldilocksField::ORDER))
+            .collect();
+
+        // CPU FFT: returns PolynomialValues in natural order
+        let poly = PolynomialCoeffs::new(coeffs.clone());
+        let cpu_result = fft(poly);
+
+        // Metal NTT
+        let gpu_result = NTT_RUNTIME.ntt(&coeffs);
+
+        // First check if GPU output is in natural order (same as CPU)
+        let natural_match = (0..n).all(|i| gpu_result[i] == cpu_result.values[i]);
+
+        if natural_match {
+            println!(
+                "NTT log_n={}: GPU output is in natural order, all {} values match",
+                log_n, n
+            );
+            return;
+        }
+
+        // Otherwise check if GPU output is in bit-reversed order
+        for i in 0..n {
+            let rev_i = reverse_bits_usize(i, log_n);
+            assert_eq!(
+                gpu_result[i], cpu_result.values[rev_i],
+                "NTT mismatch at index {} (bit-reversed {}), log_n={}",
+                i, rev_i, log_n
+            );
+        }
+        println!(
+            "NTT log_n={}: GPU output is in bit-reversed order, all {} values match after reorder",
+            log_n, n
+        );
+    }
+
+    #[test]
+    fn test_ntt_2_16() {
+        test_ntt_at_size(16);
+    }
+
+    #[test]
+    fn test_ntt_2_20() {
+        test_ntt_at_size(20);
+    }
+
+    /// Test INTT roundtrip: NTT then INTT should recover the original coefficients
+    fn test_intt_roundtrip_at_size(log_n: usize) {
+        let n = 1usize << log_n;
+        let original: Vec<GoldilocksField> = (0..n)
+            .map(|i| GoldilocksField::from_canonical_u64(i as u64 % GoldilocksField::ORDER))
+            .collect();
+
+        let ntt_result = NTT_RUNTIME.ntt(&original);
+        let recovered = NTT_RUNTIME.intt(&ntt_result);
+
+        for i in 0..n {
+            assert_eq!(
+                recovered[i], original[i],
+                "INTT roundtrip mismatch at index {}, log_n={}: got {:?}, expected {:?}",
+                i, log_n, recovered[i], original[i]
+            );
+        }
+        println!(
+            "INTT roundtrip log_n={}: all {} values match",
+            log_n, n
+        );
+    }
+
+    #[test]
+    fn test_intt_roundtrip_2_16() {
+        test_intt_roundtrip_at_size(16);
+    }
+
+    #[test]
+    fn test_intt_roundtrip_2_20() {
+        test_intt_roundtrip_at_size(20);
+    }
+
+    /// Compare Metal lde_onto_coset against CPU path:
+    ///   CPU: ifft(values) -> lde(rate_bits) -> coset_fft(coset_shift)
+    ///   GPU: intt(values) -> zero_pad -> coset_ntt(shift)
+    fn test_lde_onto_coset_at_size(log_n: usize, rate_bits: usize) {
+        use plonky2_field::fft::ifft;
+        use plonky2_field::polynomial::PolynomialValues;
+
+        let n = 1usize << log_n;
+        let extended_n = n << rate_bits;
+        let extended_log_n = extended_n.trailing_zeros() as usize;
+
+        let values: Vec<GoldilocksField> = (0..n)
+            .map(|i| GoldilocksField::from_canonical_u64((i as u64 + 1) % GoldilocksField::ORDER))
+            .collect();
+
+        // CPU path: ifft -> lde (zero-pad) -> coset_fft
+        let poly_values = PolynomialValues::new(values.clone());
+        let cpu_coeffs = ifft(poly_values);
+        let cpu_lde_coeffs = cpu_coeffs.lde(rate_bits);
+        let cpu_result = cpu_lde_coeffs.coset_fft(GoldilocksField::coset_shift());
+
+        // GPU path
+        let gpu_result = NTT_RUNTIME.lde_onto_coset(&values, rate_bits);
+
+        // First check natural order match
+        let natural_match = (0..extended_n).all(|i| gpu_result[i] == cpu_result.values[i]);
+
+        if natural_match {
+            println!(
+                "LDE onto coset (log_n={}, rate_bits={}): GPU output is in natural order, all {} values match",
+                log_n, rate_bits, extended_n
+            );
+            return;
+        }
+
+        // Check bit-reversed order match
+        let bit_reversed_match = (0..extended_n).all(|i| {
+            let rev_i = reverse_bits_usize(i, extended_log_n);
+            gpu_result[i] == cpu_result.values[rev_i]
+        });
+
+        if bit_reversed_match {
+            println!(
+                "LDE onto coset (log_n={}, rate_bits={}): GPU output is in bit-reversed order, all {} values match after reorder",
+                log_n, rate_bits, extended_n
+            );
+            return;
+        }
+
+        // Neither matched - show first few mismatches for debugging
+        let mut mismatches = 0;
+        for i in 0..extended_n {
+            if gpu_result[i] != cpu_result.values[i] {
+                if mismatches < 10 {
+                    let rev_i = reverse_bits_usize(i, extended_log_n);
+                    println!(
+                        "  Mismatch at i={}: gpu={:?}, cpu_natural={:?}, cpu_bitrev={:?}",
+                        i, gpu_result[i], cpu_result.values[i], cpu_result.values[rev_i]
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        panic!(
+            "LDE onto coset (log_n={}, rate_bits={}): {} / {} values mismatched in both natural and bit-reversed order",
+            log_n, rate_bits, mismatches, extended_n
+        );
+    }
+
+    #[test]
+    fn test_lde_onto_coset_2_16_rate_2() {
+        test_lde_onto_coset_at_size(16, 2);
+    }
+
+    #[test]
+    fn test_lde_onto_coset_2_18_rate_3() {
+        test_lde_onto_coset_at_size(18, 3);
     }
 }
