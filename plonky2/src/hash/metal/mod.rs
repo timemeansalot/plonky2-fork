@@ -8,6 +8,7 @@
 
 pub(crate) mod buffer_pool;
 pub(crate) mod merkle;
+pub(crate) mod ntt;
 pub(crate) mod runtime;
 pub(crate) mod threadgroup_config;
 pub(crate) mod tracking;
