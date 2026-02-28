@@ -304,6 +304,49 @@ impl MetalRuntime {
         TrackedBuffer::new(buffer)
     }
 
+    /// Wrap existing memory as a Metal buffer with zero copy (UMA).
+    ///
+    /// On Apple Silicon, CPU and GPU share physical memory. This avoids
+    /// copying data by wrapping the existing pointer directly.
+    ///
+    /// # Requirements
+    /// - `data` pointer must be page-aligned (16KB on Apple Silicon)
+    /// - `data` length in bytes must be a multiple of the page size
+    /// - Caller must ensure `data` outlives the returned Buffer
+    ///
+    /// Returns `Some(Buffer)` if the pointer is page-aligned, `None` otherwise.
+    pub fn try_wrap_no_copy<T>(&self, data: &[T]) -> Option<Buffer> {
+        let ptr = data.as_ptr() as usize;
+        let len = std::mem::size_of_val(data);
+        // Apple Silicon page size is 16KB. We only compile this path on macOS.
+        let page_size: usize = 16384;
+
+        if ptr % page_size != 0 {
+            return None;
+        }
+
+        // Round length up to page boundary (Metal requirement)
+        let aligned_len = (len + page_size - 1) & !(page_size - 1);
+
+        let buffer = self.device.lock().unwrap().new_buffer_with_bytes_no_copy(
+            data.as_ptr() as *const std::ffi::c_void,
+            aligned_len as u64,
+            MTLResourceOptions::StorageModeShared,
+            None, // no deallocator — Rust owns the memory
+        );
+        track_allocation(len);
+        Some(buffer)
+    }
+
+    /// Wrap existing memory as zero-copy, or copy if not page-aligned.
+    pub fn wrap_or_copy<T>(&self, data: &[T]) -> Buffer {
+        if let Some(buf) = self.try_wrap_no_copy(data) {
+            buf
+        } else {
+            self.alloc_with_data(data)
+        }
+    }
+
     /// Round size up to 256-byte alignment.
     pub const fn align_to_256(len: usize) -> usize {
         const ALIGNMENT: usize = 256;

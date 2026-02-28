@@ -501,7 +501,10 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
 
     // All-cap trees have no internal digests; CPU handles them directly.
     // Small trees: Metal dispatch overhead exceeds compute benefit below 2^13 leaves.
-    if cap_height == tree_height || tree_height < 13 {
+    // Large trees (height > 20): coalesced shader's wait_until_completed() blocks Rayon
+    // worker threads, causing worse parallel throughput than CPU fallback.
+    // The coalesced shader code is kept for future async dispatch optimization.
+    if cap_height == tree_height || tree_height < 13 || tree_height > 20 {
         fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
         return;
     }
@@ -512,26 +515,16 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
         std::slice::from_raw_parts(leaves.as_ptr() as *const GoldilocksField, leaves.len())
     };
 
-    // Route based on tree size:
-    // - tree_height >= 21: coalesced shader (2D dispatch, bandwidth-optimized)
-    // - tree_height 13..=20: linear+threadgroup shader (1D dispatch)
+    // Use zero-copy UMA buffer when possible (page-aligned data),
+    // falling back to memcpy if not aligned.
     let (gpu_digests, gpu_caps) = autoreleasepool(|| {
-        let leaves_buf = RUNTIME.alloc_with_data_tracked(leaves_gl);
-        let result = if tree_height >= 21 {
-            RUNTIME.hash_merkle_tree_coalesced_buf_ho(
-                leaves_buf.into_inner_untracked(),
-                tree_height,
-                leaf_size,
-                cap_height,
-            )
-        } else {
-            RUNTIME.hash_merkle_tree_linear_threadgroup_buf_ho(
-                leaves_buf.into_inner_untracked(),
-                tree_height,
-                leaf_size,
-                cap_height,
-            )
-        };
+        let leaves_buf = RUNTIME.wrap_or_copy(leaves_gl);
+        let result = RUNTIME.hash_merkle_tree_linear_threadgroup_buf_ho(
+            leaves_buf,
+            tree_height,
+            leaf_size,
+            cap_height,
+        );
         track_deallocation(leaves_gl.len() * std::mem::size_of::<GoldilocksField>());
         result
     });
