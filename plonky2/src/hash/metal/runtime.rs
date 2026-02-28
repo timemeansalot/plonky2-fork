@@ -1,7 +1,7 @@
 //! MetalRuntime core struct and buffer allocation methods.
 //!
 //! Provides the central GPU runtime with pipeline state caching and buffer management.
-//! Only the linear+threadgroup Poseidon Merkle shader is loaded.
+//! Loads linear+threadgroup and coalesced Poseidon Merkle shaders.
 
 use metal::*;
 use once_cell::sync::Lazy;
@@ -14,6 +14,12 @@ use crate::hash::metal::tracking::{track_allocation, track_deallocation, Tracked
 const SHADERLIB_LINEAR_THREADGROUP: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/poseidon_merkle_hasher_linear_threadgroup.metallib"
+));
+
+/// Pre-compiled coalesced shader library embedded at build time.
+const SHADERLIB_COALESCED: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/poseidon_merkle_hasher_coalesced.metallib"
 ));
 
 pub struct MetalRuntime {
@@ -29,6 +35,19 @@ pub struct MetalRuntime {
     pub(crate) pso_poseidon_hash_leaves_linear_threadgroup: ComputePipelineState,
     pub(crate) pso_poseidon_hash_tree_level_linear_threadgroup: ComputePipelineState,
     pub(crate) pso_poseidon_hash_caps_linear_threadgroup: ComputePipelineState,
+    // Coalesced bandwidth-optimized pipeline states
+    #[allow(dead_code)]
+    f_poseidon_hash_leaves_coalesced: Function,
+    #[allow(dead_code)]
+    f_poseidon_hash_tree_level_coalesced: Function,
+    #[allow(dead_code)]
+    f_poseidon_hash_tree_level_coalesced_instrumented: Function,
+    #[allow(dead_code)]
+    f_poseidon_hash_caps_coalesced: Function,
+    pub(crate) pso_poseidon_hash_leaves_coalesced: ComputePipelineState,
+    pub(crate) pso_poseidon_hash_tree_level_coalesced: ComputePipelineState,
+    pub(crate) pso_poseidon_hash_tree_level_coalesced_instrumented: ComputePipelineState,
+    pub(crate) pso_poseidon_hash_caps_coalesced: ComputePipelineState,
     pub(crate) command_queue: CommandQueue,
     init_time: u128,
 }
@@ -63,6 +82,26 @@ pub static RUNTIME: Lazy<MetalRuntime> = Lazy::new(|| {
     let pso_level = create_pso(&device, &f_level);
     let pso_caps = create_pso(&device, &f_caps);
 
+    let lib_coal = device
+        .new_library_with_data(SHADERLIB_COALESCED)
+        .unwrap();
+    let f_leaves_coal = lib_coal
+        .get_function("poseidon_hash_leaves_coalesced", None)
+        .unwrap();
+    let f_level_coal = lib_coal
+        .get_function("poseidon_hash_tree_level_coalesced", None)
+        .unwrap();
+    let f_level_coal_instr = lib_coal
+        .get_function("poseidon_hash_tree_level_coalesced_instrumented", None)
+        .unwrap();
+    let f_caps_coal = lib_coal
+        .get_function("poseidon_hash_caps_coalesced", None)
+        .unwrap();
+    let pso_leaves_coal = create_pso(&device, &f_leaves_coal);
+    let pso_level_coal = create_pso(&device, &f_level_coal);
+    let pso_level_coal_instr = create_pso(&device, &f_level_coal_instr);
+    let pso_caps_coal = create_pso(&device, &f_caps_coal);
+
     MetalRuntime {
         device: Mutex::new(Device::system_default().unwrap()),
         command_queue,
@@ -72,6 +111,14 @@ pub static RUNTIME: Lazy<MetalRuntime> = Lazy::new(|| {
         f_poseidon_hash_leaves_linear_threadgroup: f_leaves,
         f_poseidon_hash_tree_level_linear_threadgroup: f_level,
         f_poseidon_hash_caps_linear_threadgroup: f_caps,
+        pso_poseidon_hash_leaves_coalesced: pso_leaves_coal,
+        pso_poseidon_hash_tree_level_coalesced: pso_level_coal,
+        pso_poseidon_hash_tree_level_coalesced_instrumented: pso_level_coal_instr,
+        pso_poseidon_hash_caps_coalesced: pso_caps_coal,
+        f_poseidon_hash_leaves_coalesced: f_leaves_coal,
+        f_poseidon_hash_tree_level_coalesced: f_level_coal,
+        f_poseidon_hash_tree_level_coalesced_instrumented: f_level_coal_instr,
+        f_poseidon_hash_caps_coalesced: f_caps_coal,
         init_time: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -106,6 +153,26 @@ impl MetalRuntime {
         &self,
     ) -> &ComputePipelineState {
         &self.pso_poseidon_hash_caps_linear_threadgroup
+    }
+
+    // ── Coalesced pipeline state accessors ──────────────────────────────────
+
+    pub fn get_poseidon_hash_leaves_coalesced_pipeline_state(
+        &self,
+    ) -> &ComputePipelineState {
+        &self.pso_poseidon_hash_leaves_coalesced
+    }
+
+    pub fn get_poseidon_hash_tree_level_coalesced_pipeline_state(
+        &self,
+    ) -> &ComputePipelineState {
+        &self.pso_poseidon_hash_tree_level_coalesced
+    }
+
+    pub fn get_poseidon_hash_caps_coalesced_pipeline_state(
+        &self,
+    ) -> &ComputePipelineState {
+        &self.pso_poseidon_hash_caps_coalesced
     }
 
     // ── Buffer allocation ─────────────────────────────────────────────────────
