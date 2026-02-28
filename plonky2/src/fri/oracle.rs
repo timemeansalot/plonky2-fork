@@ -260,24 +260,12 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         timing: &mut TimingTree,
         fft_root_table: Option<&FftRootTable<F>>,
     ) -> Self {
-        #[cfg(feature = "metal")]
-        {
-            if !polynomials.is_empty() {
-                let degree = polynomials[0].len();
-                let log_n = log2_strict(degree);
-                if log_n + rate_bits >= 16 {
-                    return Self::from_coeffs_metal(
-                        polynomials,
-                        rate_bits,
-                        blinding,
-                        cap_height,
-                        timing,
-                        fft_root_table,
-                    );
-                }
-            }
-        }
-
+        // Metal NTT path disabled: benchmarks showed +8.4% regression at degree 17
+        // due to per-polynomial buffer allocation/copy/wait overhead.
+        // Keep from_coeffs_metal() and ntt.rs for future optimization with:
+        // - UMA zero-copy shared buffers
+        // - Batched multi-polynomial dispatch
+        // - Buffer pooling and cached PSOs
         Self::from_coeffs_cpu(
             polynomials,
             rate_bits,
