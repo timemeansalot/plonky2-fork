@@ -164,6 +164,93 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         }
     }
 
+    #[cfg(feature = "metal")]
+    fn from_coeffs_metal(
+        polynomials: Vec<PolynomialCoeffs<F>>,
+        rate_bits: usize,
+        blinding: bool,
+        cap_height: usize,
+        timing: &mut TimingTree,
+        _fft_root_table: Option<&FftRootTable<F>>,
+    ) -> Self {
+        use plonky2_field::goldilocks_field::GoldilocksField;
+        use plonky2_field::types::Field as FieldTrait;
+        use plonky2_field::types::PrimeField64;
+        use crate::hash::metal::ntt::NTT_RUNTIME;
+
+        let degree = polynomials[0].len();
+
+        // Verify F is GoldilocksField (size + alignment check)
+        let is_goldilocks = std::mem::size_of::<F>() == std::mem::size_of::<GoldilocksField>()
+            && std::mem::align_of::<F>() == std::mem::align_of::<GoldilocksField>();
+
+        if !is_goldilocks {
+            return Self::from_coeffs_cpu(
+                polynomials, rate_bits, blinding, cap_height, timing, _fft_root_table,
+            );
+        }
+
+        let salt_size = if blinding { SALT_SIZE } else { 0 };
+
+        // GPU LDE: for each polynomial, zero-pad coefficients then coset NTT
+        let lde_values: Vec<Vec<F>> = timed!(
+            timing,
+            "Metal LDE",
+            polynomials
+                .par_iter()
+                .map(|p| {
+                    assert_eq!(p.len(), degree, "Polynomial degrees inconsistent");
+                    let n = p.len();
+                    let extended_n = n << rate_bits;
+
+                    // Cast coefficients to GoldilocksField
+                    let coeffs_gl: &[GoldilocksField] = unsafe {
+                        std::slice::from_raw_parts(
+                            p.coeffs.as_ptr() as *const GoldilocksField,
+                            n,
+                        )
+                    };
+
+                    // Zero-pad to extended size
+                    let mut padded = vec![GoldilocksField::ZERO; extended_n];
+                    padded[..n].copy_from_slice(coeffs_gl);
+
+                    // Coset NTT: evaluate on coset shift * H'
+                    let shift = GoldilocksField::MULTIPLICATIVE_GROUP_GENERATOR.to_canonical_u64();
+                    let result_gl = NTT_RUNTIME.coset_ntt(&padded, shift);
+
+                    // Cast back to F
+                    unsafe {
+                        let ptr = result_gl.as_ptr() as *const F;
+                        std::slice::from_raw_parts(ptr, result_gl.len()).to_vec()
+                    }
+                })
+                .chain(
+                    (0..salt_size)
+                        .into_par_iter()
+                        .map(|_| F::rand_vec(degree << rate_bits)),
+                )
+                .collect()
+        );
+
+        // Transpose + bit-reverse + Merkle tree (same as CPU path)
+        let mut leaves = timed!(timing, "transpose LDEs", transpose(&lde_values));
+        reverse_index_bits_in_place(&mut leaves);
+        let merkle_tree = timed!(
+            timing,
+            "build Merkle tree",
+            MerkleTree::new_from_2d(leaves, cap_height)
+        );
+
+        Self {
+            polynomials,
+            merkle_tree,
+            degree_log: log2_strict(degree),
+            rate_bits,
+            blinding,
+        }
+    }
+
     #[cfg(not(feature = "cuda"))]
     pub fn from_coeffs(
         polynomials: Vec<PolynomialCoeffs<F>>,
@@ -173,6 +260,24 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         timing: &mut TimingTree,
         fft_root_table: Option<&FftRootTable<F>>,
     ) -> Self {
+        #[cfg(feature = "metal")]
+        {
+            if !polynomials.is_empty() {
+                let degree = polynomials[0].len();
+                let log_n = log2_strict(degree);
+                if log_n + rate_bits >= 16 {
+                    return Self::from_coeffs_metal(
+                        polynomials,
+                        rate_bits,
+                        blinding,
+                        cap_height,
+                        timing,
+                        fft_root_table,
+                    );
+                }
+            }
+        }
+
         Self::from_coeffs_cpu(
             polynomials,
             rate_bits,
