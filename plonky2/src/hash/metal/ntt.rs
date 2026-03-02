@@ -615,6 +615,78 @@ impl MetalNTT {
         self.ntt(&shifted_coeffs)
     }
 
+    /// Batched coset NTT: evaluates multiple polynomials on coset shift*H.
+    ///
+    /// Applies coset shift on CPU (Rayon parallel), packs all polynomials into a
+    /// single contiguous GPU buffer, and dispatches one batched NTT.
+    /// This eliminates N-1 GPU round-trips compared to calling coset_ntt N times.
+    pub fn batch_coset_ntt(
+        &self,
+        polys: &[Vec<GoldilocksField>],
+        shift: u64,
+    ) -> Vec<Vec<GoldilocksField>> {
+        use plonky2_maybe_rayon::*;
+
+        let batch_count = polys.len();
+        if batch_count == 0 {
+            return Vec::new();
+        }
+
+        let n = polys[0].len();
+        assert!(n.is_power_of_two(), "Polynomial size must be power of 2");
+        let log_n = n.trailing_zeros() as usize;
+        assert!(
+            log_n <= self.max_log_n,
+            "NTT size exceeds maximum supported"
+        );
+
+        // Step 1: Apply coset shift to each polynomial (CPU, Rayon parallel)
+        let shifted_polys: Vec<Vec<GoldilocksField>> = polys
+            .par_iter()
+            .map(|coeffs| {
+                assert_eq!(coeffs.len(), n, "All polynomials must be same size");
+                let mut shifted = Vec::with_capacity(n);
+                let mut shift_pow = 1u64;
+                for &c in coeffs {
+                    let s = mul_mod(c.0, shift_pow, GOLDILOCKS_PRIME);
+                    shifted.push(GoldilocksField::from_canonical_u64(s));
+                    shift_pow = mul_mod(shift_pow, shift, GOLDILOCKS_PRIME);
+                }
+                shifted
+            })
+            .collect();
+
+        // Step 2: Pack into contiguous buffer [poly0|poly1|...|polyN]
+        let total_elements = batch_count * n;
+        let mut packed = Vec::with_capacity(total_elements);
+        for poly in &shifted_polys {
+            packed.extend_from_slice(poly);
+        }
+
+        // Step 3: Create GPU buffer
+        let buffer_size = total_elements * std::mem::size_of::<u64>();
+        track_allocation(buffer_size);
+        let data_buffer = self.device.lock().unwrap().new_buffer_with_data(
+            packed.as_ptr() as *const _,
+            buffer_size as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Step 4: Batched NTT in place
+        self.batch_ntt_in_place(&data_buffer, n, log_n, batch_count, false);
+
+        // Step 5: Read back and split into individual results
+        let ptr = data_buffer.contents() as *const GoldilocksField;
+        let all_results = unsafe { std::slice::from_raw_parts(ptr, total_elements) };
+
+        let results: Vec<Vec<GoldilocksField>> = (0..batch_count)
+            .map(|b| all_results[b * n..(b + 1) * n].to_vec())
+            .collect();
+
+        track_deallocation(buffer_size);
+        results
+    }
+
     /// Coset INTT: inverse of coset_ntt
     ///
     /// Takes evaluations on coset shift*H and returns coefficients
@@ -921,6 +993,54 @@ mod tests {
         }
         println!(
             "Batch NTT: {} polys of size 2^{} all match individual NTTs",
+            batch_count, log_n
+        );
+    }
+
+    /// Test that batch_coset_ntt matches individual coset_ntt calls
+    #[test]
+    fn test_batch_coset_ntt_correctness() {
+        let log_n = 16;
+        let n = 1usize << log_n;
+        let batch_count = 4;
+        let shift = GOLDILOCKS_COSET_SHIFT;
+
+        let polys: Vec<Vec<GoldilocksField>> = (0..batch_count)
+            .map(|b| {
+                (0..n)
+                    .map(|i| {
+                        GoldilocksField::from_canonical_u64(
+                            ((b * 1000 + i) as u64) % GoldilocksField::ORDER,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Individual coset NTTs
+        let individual_results: Vec<Vec<GoldilocksField>> = polys
+            .iter()
+            .map(|p| NTT_RUNTIME.coset_ntt(p, shift))
+            .collect();
+
+        // Batch coset NTT
+        let batch_results = NTT_RUNTIME.batch_coset_ntt(&polys, shift);
+
+        assert_eq!(batch_results.len(), batch_count);
+        for b in 0..batch_count {
+            assert_eq!(batch_results[b].len(), n);
+            for i in 0..n {
+                assert_eq!(
+                    batch_results[b][i],
+                    individual_results[b][i],
+                    "Batch coset NTT mismatch at poly={}, index={}",
+                    b,
+                    i
+                );
+            }
+        }
+        println!(
+            "Batch coset NTT: {} polys of size 2^{} all match individual coset NTTs",
             batch_count, log_n
         );
     }
