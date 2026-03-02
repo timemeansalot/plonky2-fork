@@ -516,7 +516,14 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
 
     // Buffer allocation uses Device which is Mutex-protected, safe from any thread.
     // GPU command buffer submission is serialized by the dedicated dispatch thread.
+    #[cfg(feature = "timing")]
+    let t0 = std::time::Instant::now();
+
     let leaves_buf = RUNTIME.wrap_or_copy(leaves_gl);
+
+    #[cfg(feature = "timing")]
+    let t1 = std::time::Instant::now();
+
     let (gpu_digests, gpu_caps) = if tree_height > 20 {
         gpu_thread::GPU_DISPATCHER
             .dispatch_merkle_coalesced(leaves_buf, tree_height, leaf_size, cap_height)
@@ -526,6 +533,9 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
     };
     track_deallocation(leaves_gl.len() * std::mem::size_of::<GoldilocksField>());
 
+    #[cfg(feature = "timing")]
+    let t2 = std::time::Instant::now();
+
     // Safety: HashOut<GoldilocksField> and H::Hash have identical memory layout
     // when H::HASHER_TYPE == Poseidon (both are [u64; 4]).
     for (dst, src) in digests_buf.iter_mut().zip(gpu_digests.iter()) {
@@ -533,6 +543,20 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
     }
     for (dst, src) in cap_buf.iter_mut().zip(gpu_caps.iter()) {
         dst.write(unsafe { *(src as *const _ as *const H::Hash) });
+    }
+
+    #[cfg(feature = "timing")]
+    {
+        let t3 = std::time::Instant::now();
+        let path = if tree_height > 20 { "coalesced" } else { "linear_tg" };
+        eprintln!(
+            "[merkle-gpu h={} {}] wrap_or_copy={:.1}ms gpu_dispatch={:.1}ms digest_copy={:.1}ms total={:.1}ms",
+            tree_height, path,
+            t1.duration_since(t0).as_secs_f64() * 1000.0,
+            t2.duration_since(t1).as_secs_f64() * 1000.0,
+            t3.duration_since(t2).as_secs_f64() * 1000.0,
+            t3.duration_since(t0).as_secs_f64() * 1000.0,
+        );
     }
 }
 
