@@ -497,11 +497,13 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
         return;
     }
 
-    // All-cap trees have no internal digests; CPU handles them directly.
-    // Small trees: Metal dispatch overhead exceeds compute benefit below 2^13 leaves.
-    // Large trees (height > 20): GPU is ~10-15% slower than multi-core CPU at these sizes
-    // due to UMA memory bandwidth saturation — CPU Rayon parallelism wins.
-    if cap_height == tree_height || tree_height < 13 || tree_height > 20 {
+    // Metal Merkle routing:
+    //   tree_height < 13           → CPU  (dispatch overhead > compute benefit)
+    //   tree_height 13..=20        → GPU linear+threadgroup
+    //   tree_height == 21          → GPU coalesced  (12-14% faster than CPU)
+    //   tree_height >= 22          → CPU  (UMA bandwidth saturation, GPU 2x slower)
+    //   cap_height == tree_height  → CPU  (all-cap trees)
+    if cap_height == tree_height || tree_height < 13 || tree_height >= 22 {
         fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
         return;
     }
@@ -515,8 +517,13 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
     // Buffer allocation uses Device which is Mutex-protected, safe from any thread.
     // GPU command buffer submission is serialized by the dedicated dispatch thread.
     let leaves_buf = RUNTIME.wrap_or_copy(leaves_gl);
-    let (gpu_digests, gpu_caps) = gpu_thread::GPU_DISPATCHER
-        .dispatch_merkle_linear_threadgroup(leaves_buf, tree_height, leaf_size, cap_height);
+    let (gpu_digests, gpu_caps) = if tree_height > 20 {
+        gpu_thread::GPU_DISPATCHER
+            .dispatch_merkle_coalesced(leaves_buf, tree_height, leaf_size, cap_height)
+    } else {
+        gpu_thread::GPU_DISPATCHER
+            .dispatch_merkle_linear_threadgroup(leaves_buf, tree_height, leaf_size, cap_height)
+    };
     track_deallocation(leaves_gl.len() * std::mem::size_of::<GoldilocksField>());
 
     // Safety: HashOut<GoldilocksField> and H::Hash have identical memory layout

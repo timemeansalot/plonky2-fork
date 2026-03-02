@@ -55,4 +55,32 @@ All times are `prove_min` in milliseconds, 2 iterations each.
 
 **Winner: Approach C (coalesced shader).** Simple routing change, biggest speedup, no memory contention.
 
+### d19 Coalesced Regression Discovery (2026-03-02)
+
+Testing Approach C at d19 revealed a severe regression:
+
+| Config | d19 prove_min | vs CPU-only |
+|--------|--------------|-------------|
+| CPU-only baseline | 98,904ms | — |
+| **Coalesced (tree_height=22)** | **201,091ms** | **+103% (2x slower!)** |
+
+The coalesced shader hits a UMA bandwidth cliff between tree_height=21 (2^21 = 2M leaves) and tree_height=22 (2^22 = 4M leaves). At 4M leaves, GPU memory throughput collapses.
+
+### Final Routing (2026-03-02)
+
+Refined to coalesced for tree_height == 21 only:
+
+```
+tree_height < 13     → CPU  (dispatch overhead)
+tree_height 13..=20  → GPU linear+threadgroup
+tree_height == 21    → GPU coalesced  (d18: 12-14% faster than CPU)
+tree_height >= 22    → CPU  (UMA bandwidth cliff, GPU 2x slower)
+```
+
+| Degree | tree_height | GPU Path | Speedup vs CPU |
+|--------|-------------|----------|----------------|
+| d13-d17 | 16-20 | linear+threadgroup | 16-28% faster |
+| **d18** | **21** | **coalesced** | **12-14% faster** |
+| d19-d20 | 22-23 | CPU fallback | — |
+
 <!-- More results appended below -->

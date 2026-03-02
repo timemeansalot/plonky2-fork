@@ -135,7 +135,6 @@ impl GpuDispatcher {
     /// Dispatch a coalesced Merkle tree hash job to the GPU thread.
     ///
     /// Same blocking pattern as `dispatch_merkle_linear_threadgroup`.
-    #[allow(dead_code)]
     pub(crate) fn dispatch_merkle_coalesced(
         &self,
         leaves_buffer: Buffer,

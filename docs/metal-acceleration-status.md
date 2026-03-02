@@ -5,9 +5,10 @@
 | Component | Range | Status | Speedup |
 |-----------|-------|--------|---------|
 | Merkle — linear+threadgroup | tree_height 13..=20 | **Active** | 16-28% faster than CPU |
-| Merkle — coalesced | tree_height > 20 | **Disabled** (10-15% slower due to UMA saturation) | N/A |
+| Merkle — coalesced | tree_height == 21 | **Active** | 12-14% faster than CPU |
+| Merkle — coalesced | tree_height >= 22 | **Disabled** (UMA bandwidth cliff, GPU 2x slower) | N/A |
 | NTT/LDE (batched) | log_n + rate_bits >= 16 | **Disabled** (20-36% slower; GPU ALU < CPU Rayon for 64-bit math) | N/A |
-| Merkle — CPU fallback | tree_height < 13 or > 20, all-cap, non-Poseidon | **Active** | baseline |
+| Merkle — CPU fallback | tree_height < 13 or >= 22, all-cap, non-Poseidon | **Active** | baseline |
 
 Feature priority: **CUDA > Metal > CPU**. Metal activates with `--features metal` when CUDA is absent.
 
@@ -20,7 +21,8 @@ Hasher != Poseidon         → CPU
 cap_height == tree_height  → CPU  (all-cap trees, no internal digests)
 tree_height < 13           → CPU  (Metal dispatch overhead > compute benefit)
 tree_height 13..=20        → GPU linear+threadgroup
-tree_height > 20           → CPU  (UMA bandwidth saturation, Rayon wins)
+tree_height == 21          → GPU coalesced  (d18: 12-14% faster than CPU)
+tree_height >= 22          → CPU  (UMA bandwidth cliff, GPU 2x slower)
 ```
 
 ### NTT (`plonky2/src/fri/oracle.rs`)
@@ -168,14 +170,14 @@ rm poseidon_merkle_hasher_coalesced.air
 
 See [metal-bfs-layout-optimization.md](metal-bfs-layout-optimization.md) for detailed benchmarks.
 
-| Degree | CPU prove_min | Metal prove_min | Speedup |
-|--------|--------------|-----------------|---------|
-| d13 | 277ms | 217ms | **1.28x** |
-| d14 | 563ms | 452ms | **1.25x** |
-| d15 | 1.11s | 931ms | **1.20x** |
-| d16 | 2.25s | 1.94s | **1.16x** |
-| d17 | 4.93s | 4.24s | **1.16x** |
-| d18 | 20.6s | 24.5s | 0.84x (CPU fallback) |
-| d19 | 140s | 152s | 0.92x (CPU fallback) |
+| Degree | CPU prove_min | Metal prove_min | Speedup | GPU Path |
+|--------|--------------|-----------------|---------|----------|
+| d13 | 277ms | 217ms | **1.28x** | linear+threadgroup |
+| d14 | 563ms | 452ms | **1.25x** | linear+threadgroup |
+| d15 | 1.11s | 931ms | **1.20x** | linear+threadgroup |
+| d16 | 2.25s | 1.94s | **1.16x** | linear+threadgroup |
+| d17 | 4.93s | 4.24s | **1.16x** | linear+threadgroup |
+| d18 | 17.8s | 15.7s | **1.13x** | coalesced |
+| d19 | 99s | — | CPU fallback | CPU (tree_height=22) |
 
-Metal is 16-28% faster for d13-d17. For d18+ the GPU is slower due to UMA memory bandwidth saturation — CPU Rayon parallelism across independent subtrees wins.
+Metal is 16-28% faster for d13-d17 (linear+threadgroup) and 12-14% faster at d18 (coalesced). At d19+ the GPU hits a UMA bandwidth cliff — CPU fallback is used.

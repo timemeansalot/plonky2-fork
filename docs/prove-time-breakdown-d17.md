@@ -87,13 +87,14 @@ Based on steady-state time share:
 
 ## Metal Optimization Ceiling
 
-The current Merkle-only GPU path at d13-d17 (16-28% speedup) is likely near the ceiling for Apple Silicon Metal acceleration on this workload:
+The Merkle-only GPU path at d13-d18 (12-28% speedup) is near the ceiling for Apple Silicon Metal acceleration on this workload:
 
 | Optimization | Result | Why |
 |-------------|--------|-----|
-| Merkle linear+threadgroup (active) | **16-28% faster** | Poseidon hashing maps well to GPU |
-| Merkle coalesced for d18+ | **10-15% slower** | UMA bandwidth saturation; CPU Rayon wins on 16 subtrees |
+| Merkle linear+threadgroup d13-d17 (active) | **16-28% faster** | Poseidon hashing maps well to GPU |
+| Merkle coalesced d18 / tree_height=21 (active) | **12-14% faster** | Coalesced memory access pattern efficient at this size |
+| Merkle coalesced d19+ / tree_height>=22 | **2x slower** | UMA bandwidth cliff at 4M+ leaves |
 | GPU NTT per-polynomial | **+2-13% slower** | 72 GPU round-trips overhead |
 | GPU NTT batched | **+20-36% slower** | GPU ALU throughput < CPU Rayon for 64-bit modular arithmetic |
 
-The 66% of prove time spent in Merkle is already GPU-accelerated. The remaining 34% (FFT, quotient, FRI) is CPU-bound work where Apple Silicon GPU offers no advantage.
+The 66% of prove time spent in Merkle is GPU-accelerated for d13-d18. The remaining 34% (FFT, quotient, FRI) is CPU-bound work where Apple Silicon GPU offers no advantage. At d19+ the Merkle trees exceed the GPU's UMA bandwidth capacity.

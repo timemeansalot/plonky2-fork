@@ -140,7 +140,7 @@ Poseidon (primary algebraic hash), Poseidon2, Keccak, and BN128 Poseidon variant
 Apple Silicon GPU acceleration via the Metal API. Priority: CUDA > Metal > CPU. See [`docs/metal-acceleration-status.md`](docs/metal-acceleration-status.md) for full details.
 
 **Routing:**
-- Merkle: GPU for tree_height 13..=20 (Poseidon only), CPU otherwise
+- Merkle: GPU for tree_height 13..=21 (Poseidon only), CPU otherwise
 - NTT: GPU for log_n + rate_bits >= 16, CPU otherwise
 
 **Key modules:** `runtime.rs` (device/pipelines), `gpu_thread.rs` (dedicated dispatch thread), `merkle.rs` (Merkle hashing), `ntt.rs` (NTT/LDE), `buffer_pool.rs` (buffer reuse).
