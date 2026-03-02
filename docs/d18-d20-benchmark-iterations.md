@@ -35,4 +35,24 @@ All times are `prove_min` in milliseconds, 2 iterations each.
 **Changes:** Loop over 16 subtrees, dispatch each individually to `dispatch_merkle_linear_threadgroup` with cap_height=0.
 **Observations:** Faster than CPU but slower than Approach C. The 16 separate GPU round-trips add overhead. High variance between iterations (16.6s best, 22.9s worst) due to memory pressure.
 
+### Approach A: Hybrid CPU+GPU split (2026-03-02)
+
+| Config | d18 prove_min | vs CPU-only |
+|--------|--------------|-------------|
+| CPU-only baseline | 17,777ms | — |
+| **Hybrid (8 GPU + 8 CPU subtrees)** | **21,233ms** | **+19% (slower!)** |
+
+**Changes:** Split 16 subtrees: 8 dispatched to GPU via `dispatch_merkle_linear_threadgroup_async`, 8 processed by CPU Rayon concurrently. GPU and CPU run in parallel, total = max(GPU_time, CPU_time).
+**Observations:** Worst of all three approaches. UMA memory contention between GPU and CPU accessing shared memory simultaneously negates parallelism benefit. The GPU and CPU compete for the same memory bus, making both slower.
+
+## Summary
+
+| Approach | d18 prove_min | vs CPU-only | Rank |
+|----------|--------------|-------------|------|
+| **C: Coalesced shader** | **15,686ms** | **-12%** | **1st (winner)** |
+| B: Per-subtree dispatch | 16,618ms | -6.5% | 2nd |
+| A: Hybrid CPU+GPU | 21,233ms | +19% | 3rd (worst) |
+
+**Winner: Approach C (coalesced shader).** Simple routing change, biggest speedup, no memory contention.
+
 <!-- More results appended below -->
