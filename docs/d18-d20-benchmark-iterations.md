@@ -15,4 +15,14 @@ All times are `prove_min` in milliseconds, 2 iterations each.
 
 ## Iteration Log
 
-<!-- Results appended after each approach test -->
+### Approach C: Coalesced shader (2026-03-02)
+
+| Config | d18 prove_min | vs CPU-only |
+|--------|--------------|-------------|
+| CPU-only baseline | 17,777ms | — |
+| **Coalesced shader (tree_height > 20)** | **15,686ms** | **-12% (faster!)** |
+
+**Changes:** Route tree_height > 20 to `dispatch_merkle_coalesced` instead of CPU fallback.
+**Observations:** Coalesced shader is significantly faster than CPU at d18. Previous claim of "10-15% slower" was incorrect or outdated — likely improved by BFS layout optimization and GPU dispatch thread changes made since that measurement.
+
+<!-- More results appended below -->
