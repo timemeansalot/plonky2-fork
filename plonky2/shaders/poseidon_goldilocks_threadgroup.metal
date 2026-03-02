@@ -390,6 +390,138 @@ inline void poseidon_permute_tg_full(thread Fp* p2_state, threadgroup ulong* tg_
     }
 }
 
+// ============================================================
+// Fast partial round functions (ported from poseidon.rs)
+// ============================================================
+
+// Threadgroup memory layout for fast partial constants:
+// Offset 0: FAST_PARTIAL_FIRST_RC[12]
+// Offset 12: FAST_PARTIAL_RC[22]
+// Offset 34: FAST_PARTIAL_INIT_MATRIX[121]
+// Offset 155: FAST_PARTIAL_W_HATS[242]
+// Offset 397: FAST_PARTIAL_VS[242]
+// Total: 639 ulongs
+
+// Load fast partial constants into threadgroup memory cooperatively
+inline void load_fast_partial_constants_tg(
+    uint lid,
+    uint num_threads,
+    threadgroup ulong* tg_fp
+) {
+    for (uint i = lid; i < FAST_PARTIAL_CONST_TOTAL; i += num_threads) {
+        if (i < 12) {
+            tg_fp[i] = FAST_PARTIAL_FIRST_RC[i];
+        } else if (i < 34) {
+            tg_fp[i] = FAST_PARTIAL_RC[i - 12];
+        } else if (i < 155) {
+            tg_fp[i] = FAST_PARTIAL_INIT_MATRIX[i - 34];
+        } else if (i < 397) {
+            tg_fp[i] = FAST_PARTIAL_W_HATS[i - 155];
+        } else {
+            tg_fp[i] = FAST_PARTIAL_VS[i - 397];
+        }
+    }
+}
+
+// Add first-round constants to all state elements
+inline void partial_first_constant_layer_tg(thread Fp* p2_state, threadgroup ulong* tg_fp) {
+    // tg_fp[0..11] = FAST_PARTIAL_FIRST_RC
+    #pragma unroll
+    for (int i = 0; i < 12; i++) {
+        p2_state[i] = p2_state[i] + Fp(tg_fp[i]);
+    }
+}
+
+// Apply 11x11 initial matrix to state[1..11], state[0] passes through
+inline void mds_partial_layer_init_tg(thread Fp* p2_state, threadgroup ulong* tg_fp) {
+    // tg_fp[34..154] = FAST_PARTIAL_INIT_MATRIX (11x11, row-major)
+    // Initial matrix has first row/column = [1, 0, ..., 0]
+    // result[0] = state[0]
+    // result[c] = sum(INIT_MATRIX[r-1][c-1] * state[r] for r=1..11) for c=1..11
+
+    Fp result[12];
+    result[0] = p2_state[0];
+
+    #pragma unroll
+    for (int c = 1; c < 12; c++) {
+        Fp acc = Fp(0);
+        #pragma unroll
+        for (int r = 1; r < 12; r++) {
+            uint idx = 34 + (uint)(r - 1) * 11 + (uint)(c - 1);
+            acc = acc + Fp(tg_fp[idx]) * p2_state[r];
+        }
+        result[c] = acc;
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 12; i++) {
+        p2_state[i] = result[i];
+    }
+}
+
+// Fast partial MDS for round r:
+//   result[0] = MDS_M00 * state[0] + sum(W_HATS[r][j] * state[j+1] for j=0..10)
+//   result[i] = VS[r][i-1] * state[0] + state[i]  for i=1..11
+inline void mds_partial_layer_fast_tg(thread Fp* p2_state, int round, threadgroup ulong* tg_fp) {
+    // W_HATS start at offset 155, each round has 11 values
+    uint w_hat_base = 155 + (uint)round * 11;
+    // VS start at offset 397, each round has 11 values
+    uint vs_base = 397 + (uint)round * 11;
+
+    // Compute result[0] = MDS_M00 * state[0] + w_hat . state[1..11]
+    Fp s0 = p2_state[0];
+    Fp d = Fp(MDS_M00) * s0;
+
+    #pragma unroll
+    for (int j = 0; j < 11; j++) {
+        d = d + Fp(tg_fp[w_hat_base + (uint)j]) * p2_state[j + 1];
+    }
+
+    // Compute result[i] = VS[r][i-1] * state[0] + state[i] for i=1..11
+    #pragma unroll
+    for (int i = 1; i < 12; i++) {
+        p2_state[i] = Fp(tg_fp[vs_base + (uint)(i - 1)]) * s0 + p2_state[i];
+    }
+
+    p2_state[0] = d;
+}
+
+// Optimized Poseidon permutation with fast partial rounds
+// Requires: tg_rc, tg_mds, tg_fp all loaded and barrier-synced
+inline void poseidon_permute_tg_fast_partial(
+    thread Fp* p2_state,
+    threadgroup ulong* tg_rc,
+    threadgroup long* tg_mds,
+    threadgroup ulong* tg_fp
+) {
+    // 4 initial full rounds (use original round constants 0-3)
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        poseidon_full_round_tg_full(p2_state, i, tg_rc, tg_mds);
+    }
+
+    // Fast partial rounds
+    partial_first_constant_layer_tg(p2_state, tg_fp);
+    mds_partial_layer_init_tg(p2_state, tg_fp);
+
+    #pragma unroll
+    for (int i = 0; i < 22; i++) {
+        // S-box on state[0] only
+        p2_state[0] = p2_state[0].pow7();
+        // Add fast partial round constant to state[0]
+        // tg_fp[12..33] = FAST_PARTIAL_RC
+        p2_state[0] = p2_state[0] + Fp(tg_fp[12 + i]);
+        // Fast partial MDS
+        mds_partial_layer_fast_tg(p2_state, i, tg_fp);
+    }
+
+    // 4 final full rounds (use original round constants 26-29)
+    #pragma unroll
+    for (int i = 26; i < 30; i++) {
+        poseidon_full_round_tg_full(p2_state, i, tg_rc, tg_mds);
+    }
+}
+
 // Legacy functions that only use RC caching (for backward compatibility)
 inline void poseidon_full_round_tg(thread Fp* p2_state, int roundIndex, threadgroup ulong* tg_rc) {
     poseidon_add_rc_tg(p2_state, roundIndex, tg_rc);
