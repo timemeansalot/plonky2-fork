@@ -46,6 +46,18 @@ RUSTFLAGS=-Ctarget-cpu=native cargo run --release --example bench_recursion -- -
 # CUDA tests (requires GPU + LD_LIBRARY_PATH set)
 ./run_proof_tests.sh
 cargo test --features=cuda,batch --release
+
+# Metal tests (Apple Silicon)
+RUSTFLAGS="-Ctarget-cpu=native" cargo test --features metal --release \
+  --test metal_proof -- --nocapture --test-threads=1
+RUSTFLAGS="-Ctarget-cpu=native" cargo test --features metal --release \
+  --test metal_coalesced -- --nocapture --test-threads=1
+RUSTFLAGS="-Ctarget-cpu=native" cargo test --features metal --release \
+  -p plonky2 --lib -- test_merkle_trees_metal_poseidon_g64 --nocapture
+
+# Metal benchmarks (fast: d13-d17 ~45s, full: d13-d20 ~20+ min)
+RUSTFLAGS="-Ctarget-cpu=native" cargo test --features metal --release \
+  --test bench_degrees -- fast --nocapture --test-threads=1
 ```
 
 **CI environment flags:** `RUSTFLAGS="-Copt-level=3 -Cdebug-assertions -Coverflow-checks=y -Cdebuginfo=0"`
@@ -72,6 +84,7 @@ Note: `evm/` and `circom/` exist in the repo but are not workspace members.
 - **`std`** (default) — Standard library support
 - **`gate_testing`** (default) — Gate testing utilities
 - **`cuda`** — CUDA GPU acceleration for Merkle/NTT
+- **`metal`** — Metal GPU acceleration for Merkle/NTT (Apple Silicon)
 - **`batch`** — Batch processing mode
 - **`timing`** — Performance timing instrumentation
 - **`no_cuda`** — Explicitly disable CUDA
@@ -121,6 +134,18 @@ FRI commitment and query protocol. `FriConfig` controls rate bits, cap height, p
 ### Hash (plonky2/src/hash/)
 
 Poseidon (primary algebraic hash), Poseidon2, Keccak, and BN128 Poseidon variant. Merkle trees with configurable cap height in `merkle_tree.rs`.
+
+### Metal GPU Acceleration (plonky2/src/hash/metal/)
+
+Apple Silicon GPU acceleration via the Metal API. Priority: CUDA > Metal > CPU. See [`docs/metal-acceleration-status.md`](docs/metal-acceleration-status.md) for full details.
+
+**Routing:**
+- Merkle: GPU for tree_height 13..=20 (Poseidon only), CPU otherwise
+- NTT: GPU for log_n + rate_bits >= 16, CPU otherwise
+
+**Key modules:** `runtime.rs` (device/pipelines), `gpu_thread.rs` (dedicated dispatch thread), `merkle.rs` (Merkle hashing), `ntt.rs` (NTT/LDE), `buffer_pool.rs` (buffer reuse).
+
+**Shaders:** Precompiled `.metallib` files in `plonky2/shaders/`, embedded via `include_bytes!()`. Recompile with `xcrun -sdk macosx metal` + `xcrun -sdk macosx metallib` after editing `.metal` sources.
 
 ### Recursion (plonky2/src/recursion/)
 
