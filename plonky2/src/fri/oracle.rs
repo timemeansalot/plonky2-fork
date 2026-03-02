@@ -191,47 +191,50 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         }
 
         let salt_size = if blinding { SALT_SIZE } else { 0 };
+        let extended_n = degree << rate_bits;
+        let shift = GoldilocksField::MULTIPLICATIVE_GROUP_GENERATOR.to_canonical_u64();
 
-        // GPU LDE: for each polynomial, zero-pad coefficients then coset NTT
-        let lde_values: Vec<Vec<F>> = timed!(
+        // Prepare padded polynomials for batch NTT
+        let padded_polys: Vec<Vec<GoldilocksField>> = timed!(
             timing,
-            "Metal LDE",
+            "Metal LDE prep",
             polynomials
                 .par_iter()
                 .map(|p| {
                     assert_eq!(p.len(), degree, "Polynomial degrees inconsistent");
-                    let n = p.len();
-                    let extended_n = n << rate_bits;
-
-                    // Cast coefficients to GoldilocksField
                     let coeffs_gl: &[GoldilocksField] = unsafe {
                         std::slice::from_raw_parts(
                             p.coeffs.as_ptr() as *const GoldilocksField,
-                            n,
+                            degree,
                         )
                     };
-
-                    // Zero-pad to extended size
                     let mut padded = vec![GoldilocksField::ZERO; extended_n];
-                    padded[..n].copy_from_slice(coeffs_gl);
-
-                    // Coset NTT: evaluate on coset shift * H'
-                    let shift = GoldilocksField::MULTIPLICATIVE_GROUP_GENERATOR.to_canonical_u64();
-                    let result_gl = NTT_RUNTIME.coset_ntt(&padded, shift);
-
-                    // Cast back to F
-                    unsafe {
-                        let ptr = result_gl.as_ptr() as *const F;
-                        std::slice::from_raw_parts(ptr, result_gl.len()).to_vec()
-                    }
+                    padded[..degree].copy_from_slice(coeffs_gl);
+                    padded
                 })
-                .chain(
-                    (0..salt_size)
-                        .into_par_iter()
-                        .map(|_| F::rand_vec(degree << rate_bits)),
-                )
                 .collect()
         );
+
+        // Batched coset NTT: single GPU dispatch for all polynomials
+        let batch_results_gl: Vec<Vec<GoldilocksField>> = timed!(
+            timing,
+            "Metal batch NTT",
+            NTT_RUNTIME.batch_coset_ntt(&padded_polys, shift)
+        );
+
+        // Cast results back to F and add salt columns
+        let mut lde_values: Vec<Vec<F>> = batch_results_gl
+            .into_iter()
+            .map(|result_gl| unsafe {
+                let ptr = result_gl.as_ptr() as *const F;
+                std::slice::from_raw_parts(ptr, result_gl.len()).to_vec()
+            })
+            .collect();
+        let salt_columns: Vec<Vec<F>> = (0..salt_size)
+            .into_par_iter()
+            .map(|_| F::rand_vec(extended_n))
+            .collect();
+        lde_values.extend(salt_columns);
 
         // Transpose + bit-reverse + Merkle tree (same as CPU path)
         let mut leaves = timed!(timing, "transpose LDEs", transpose(&lde_values));
@@ -260,12 +263,22 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         timing: &mut TimingTree,
         fft_root_table: Option<&FftRootTable<F>>,
     ) -> Self {
-        // Metal NTT path disabled: benchmarks showed +8.4% regression at degree 17
-        // due to per-polynomial buffer allocation/copy/wait overhead.
-        // Keep from_coeffs_metal() and ntt.rs for future optimization with:
-        // - UMA zero-copy shared buffers
-        // - Batched multi-polynomial dispatch
-        // - Buffer pooling and cached PSOs
+        #[cfg(feature = "metal")]
+        {
+            let degree = polynomials[0].len();
+            let log_n = log2_strict(degree);
+            // Use Metal NTT for sizes where GPU batching outperforms CPU
+            if log_n + rate_bits >= 16 {
+                return Self::from_coeffs_metal(
+                    polynomials,
+                    rate_bits,
+                    blinding,
+                    cap_height,
+                    timing,
+                    fft_root_table,
+                );
+            }
+        }
         Self::from_coeffs_cpu(
             polynomials,
             rate_bits,
