@@ -5,8 +5,8 @@
 | Component | Range | Status | Speedup |
 |-----------|-------|--------|---------|
 | Merkle — linear+threadgroup | tree_height 13..=20 | **Active** | 16-28% faster than CPU |
-| Merkle — coalesced | tree_height > 20 | **Disabled** (infrastructure ready, `#[allow(dead_code)]`) | N/A |
-| NTT/LDE | log_n + rate_bits >= 16 | **Active** | Integrated in FRI oracle |
+| Merkle — coalesced | tree_height > 20 | **Disabled** (10-15% slower due to UMA saturation) | N/A |
+| NTT/LDE (batched) | log_n + rate_bits >= 16 | **Disabled** (20-36% slower; GPU ALU < CPU Rayon for 64-bit math) | N/A |
 | Merkle — CPU fallback | tree_height < 13 or > 20, all-cap, non-Poseidon | **Active** | baseline |
 
 Feature priority: **CUDA > Metal > CPU**. Metal activates with `--features metal` when CUDA is absent.
@@ -26,9 +26,10 @@ tree_height > 20           → CPU  (UMA bandwidth saturation, Rayon wins)
 ### NTT (`plonky2/src/fri/oracle.rs`)
 
 ```
-log_n + rate_bits >= 16    → GPU NTT
-otherwise                  → CPU
+All sizes                  → CPU  (GPU NTT disabled; batched NTT 20-36% slower than CPU Rayon)
 ```
+
+Infrastructure for GPU batched NTT exists in `from_coeffs_metal()` and `ntt.rs:batch_coset_ntt()` but is commented out in `from_coeffs()`.
 
 ## Metal Module Structure (`plonky2/src/hash/metal/`)
 
