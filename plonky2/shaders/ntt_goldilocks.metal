@@ -251,3 +251,34 @@ kernel void ntt_batch_butterfly(
     data[j] = gl_add(u, v);
     data[i] = gl_sub(u, v);
 }
+
+// Batch bit-reversal kernel
+// Reorders elements in each polynomial according to bit-reversed indices
+kernel void ntt_batch_bit_reverse(
+    device ulong * data[[buffer(0)]],
+    constant NTTUniforms & uniforms[[buffer(1)]],
+    constant uint & batch_count[[buffer(2)]],
+    uint gid[[thread_position_in_grid]]
+) {
+    uint total_elements = uniforms.n * batch_count;
+    if (gid >= total_elements) return;
+
+    uint batch_idx = gid / uniforms.n;
+    uint elem_idx = gid % uniforms.n;
+
+    // Compute bit-reversed index within this polynomial
+    uint rev = 0;
+    uint x = elem_idx;
+    for (uint i = 0; i < uniforms.log_n; i++) {
+        rev = (rev << 1) | (x & 1);
+        x >>= 1;
+    }
+
+    // Only swap if elem_idx < rev (to avoid double-swapping)
+    if (elem_idx < rev) {
+        uint base = batch_idx * uniforms.n;
+        ulong temp = data[base + elem_idx];
+        data[base + elem_idx] = data[base + rev];
+        data[base + rev] = temp;
+    }
+}
