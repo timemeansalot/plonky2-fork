@@ -9,6 +9,7 @@
 //! All other cases fall through to the CPU implementation.
 
 pub(crate) mod buffer_pool;
+pub(crate) mod gpu_thread;
 pub(crate) mod merkle;
 pub(crate) mod ntt;
 pub(crate) mod runtime;

@@ -307,9 +307,9 @@ kernel void poseidon_hash_caps_linear_threadgroup(
 
     uint subtree_base = gid * uniforms.subtree_digests_len;
 
-    // Read children of subtree root (they are at indices 1 and 2)
-    uint left_idx = subtree_base + 1;
-    uint right_idx = subtree_base + 2;
+    // Read children of subtree root (indices 0 and 1 in BFS layout)
+    uint left_idx = subtree_base;
+    uint right_idx = subtree_base + 1;
 
     Fp p2_state[12];
 

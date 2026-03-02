@@ -52,6 +52,12 @@ pub struct MetalRuntime {
     init_time: u128,
 }
 
+// SAFETY: MetalRuntime fields are used as follows:
+// - `device`: protected by `Mutex`, safe for concurrent access.
+// - `command_queue`: only accessed from the dedicated GPU dispatch thread
+//   (see `gpu_thread.rs`), never from multiple threads simultaneously.
+// - Pipeline states (`pso_*`) and functions (`f_*`): created once during init,
+//   then read-only. Metal PSOs are safe to share across threads for encoding.
 unsafe impl Sync for MetalRuntime {}
 
 /// Helper to create a compute pipeline state from a function.

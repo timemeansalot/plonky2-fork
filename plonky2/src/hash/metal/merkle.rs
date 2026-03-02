@@ -28,7 +28,12 @@ impl MetalRuntime {
 
         let num_caps = 1usize << cap_height;
         let subtree_leaves_len = leaf_count >> cap_height;
-        let subtree_digests_len = 2 * subtree_leaves_len - 1;
+        // Use plonky2-fork's BFS layout: 2*(n-1) digests per subtree (no root slot).
+        // The shader index formulas produce BFS positions when given this value:
+        //   leaf:     (subtree_digests_len - n) + leaf_idx = (n - 2) + leaf_idx
+        //   internal: subtree_digests_len - 2*n + (n >> level) = (n >> level) - 2
+        // This matches plonky2-fork's layout, eliminating the need for post-hoc conversion.
+        let subtree_digests_len = 2 * (subtree_leaves_len - 1);
         let total_digests = subtree_digests_len * num_caps;
         let num_layers = tree_height - cap_height;
 
@@ -203,14 +208,9 @@ impl MetalRuntime {
         command_buffer.commit();
         command_buffer.wait_until_completed();
 
-        // Convert linear layout digests to plonky2's expected format
-        let digests = self.convert_linear_to_plonky2_digests(
-            &*digests_buffer,
-            tree_height,
-            cap_height,
-            subtree_digests_len,
-            subtree_leaves_len,
-        );
+        // GPU wrote directly in plonky2-fork BFS layout — read directly, no conversion needed.
+        let digests_ptr = (*digests_buffer).contents() as *const HashOut<GoldilocksField>;
+        let digests = unsafe { from_buf_raw::<HashOut<GoldilocksField>>(digests_ptr, total_digests) };
 
         // Read caps
         let caps_ptr = (*caps_buffer).contents() as *mut HashOut<GoldilocksField>;
@@ -246,7 +246,8 @@ impl MetalRuntime {
 
         let num_caps = 1usize << cap_height;
         let subtree_leaves_len = leaf_count >> cap_height;
-        let subtree_digests_len = 2 * subtree_leaves_len - 1;
+        // Use plonky2-fork's BFS layout directly (same as linear_threadgroup path).
+        let subtree_digests_len = 2 * (subtree_leaves_len - 1);
         let total_digests = subtree_digests_len * num_caps;
         let num_layers = tree_height - cap_height;
 
@@ -446,14 +447,9 @@ impl MetalRuntime {
         command_buffer.commit();
         command_buffer.wait_until_completed();
 
-        // Convert linear layout digests to plonky2-fork's expected BFS format
-        let digests = self.convert_linear_to_plonky2_digests(
-            &*digests_buffer,
-            tree_height,
-            cap_height,
-            subtree_digests_len,
-            subtree_leaves_len,
-        );
+        // GPU wrote directly in plonky2-fork BFS layout — read directly, no conversion needed.
+        let digests_ptr = (*digests_buffer).contents() as *const HashOut<GoldilocksField>;
+        let digests = unsafe { from_buf_raw::<HashOut<GoldilocksField>>(digests_ptr, total_digests) };
 
         // Read caps
         let caps_ptr = (*caps_buffer).contents() as *mut HashOut<GoldilocksField>;
@@ -466,66 +462,4 @@ impl MetalRuntime {
         (digests, caps)
     }
 
-    /// Convert GPU linear-layout digests to plonky2-fork's level-order (BFS) layout.
-    ///
-    /// plonky2-fork stores each subtree's nodes in level-order starting from the top:
-    ///   - root's children (2 nodes) at positions 0..1
-    ///   - next level (4 nodes) at positions 2..5
-    ///   - ...
-    ///   - leaf hashes at positions (n-2)..(2n-3)  (where n = subtree_leaves_len)
-    ///
-    /// The GPU linear layout stores each level contiguously within each subtree:
-    ///   level l, node i → GPU pos = (n >> l) - 1 + i  (within subtree)
-    /// The fork CPU layout uses:
-    ///   level l, node i → CPU pos = (n >> l) - 2 + i  (within subtree)
-    pub(crate) fn convert_linear_to_plonky2_digests(
-        &self,
-        digests_buffer: &Buffer,
-        tree_height: usize,
-        cap_height: usize,
-        subtree_digests_len: usize,
-        subtree_leaves_len: usize,
-    ) -> Vec<HashOut<GoldilocksField>> {
-        let num_caps = 1usize << cap_height;
-        let num_layers = tree_height - cap_height;
-
-        // plonky2-fork CPU subtree length = 2*(subtree_leaves_len - 1) — does NOT include root
-        let subtree_digests_len_cpu = 2 * (subtree_leaves_len - 1);
-        let total_digests = subtree_digests_len_cpu * num_caps;
-
-        let mut result = vec![HashOut::default(); total_digests];
-
-        let linear_ptr = digests_buffer.contents() as *const HashOut<GoldilocksField>;
-        let linear_digests: &[HashOut<GoldilocksField>] = unsafe {
-            std::slice::from_raw_parts(linear_ptr, subtree_digests_len * num_caps)
-        };
-
-        for subtree_idx in 0..num_caps {
-            let gpu_base = subtree_idx * subtree_digests_len;
-            let cpu_base = subtree_idx * subtree_digests_len_cpu;
-
-            // Level 0: leaf hashes
-            // GPU position: gpu_base + (subtree_leaves_len - 1) + leaf_idx
-            // CPU position: cpu_base + (subtree_leaves_len - 2) + leaf_idx
-            for leaf_idx in 0..subtree_leaves_len {
-                let gpu_idx = gpu_base + (subtree_leaves_len - 1) + leaf_idx;
-                let cpu_idx = cpu_base + (subtree_leaves_len - 2) + leaf_idx;
-                result[cpu_idx] = linear_digests[gpu_idx];
-            }
-
-            // Levels 1..num_layers-1: internal nodes
-            // GPU position: gpu_base + (nodes_at_level - 1) + node_idx
-            // CPU position: cpu_base + (nodes_at_level - 2) + node_idx
-            for level in 1..num_layers {
-                let nodes_at_level = subtree_leaves_len >> level;
-                for node_idx in 0..nodes_at_level {
-                    let gpu_idx = gpu_base + (nodes_at_level - 1) + node_idx;
-                    let cpu_idx = cpu_base + (nodes_at_level - 2) + node_idx;
-                    result[cpu_idx] = linear_digests[gpu_idx];
-                }
-            }
-        }
-
-        result
-    }
 }

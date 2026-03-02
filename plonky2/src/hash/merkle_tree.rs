@@ -30,8 +30,6 @@ use crate::hash::merkle_proofs::MerkleProof;
 #[cfg(feature = "cuda")]
 use crate::plonk::config::HasherType;
 #[cfg(all(feature = "metal", not(feature = "cuda")))]
-use metal::objc::rc::autoreleasepool;
-#[cfg(all(feature = "metal", not(feature = "cuda")))]
 use plonky2_field::goldilocks_field::GoldilocksField;
 use crate::plonk::config::{GenericHashOut, Hasher};
 use crate::util::log2_strict;
@@ -486,7 +484,7 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
     leaf_size: usize,
     cap_height: usize,
 ) {
-    use crate::hash::metal::{tracking::track_deallocation, RUNTIME};
+    use crate::hash::metal::{gpu_thread, tracking::track_deallocation, RUNTIME};
     use crate::plonk::config::HasherType;
 
     let leaf_count = leaves.len() / leaf_size;
@@ -501,9 +499,8 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
 
     // All-cap trees have no internal digests; CPU handles them directly.
     // Small trees: Metal dispatch overhead exceeds compute benefit below 2^13 leaves.
-    // Large trees (height > 20): coalesced shader's wait_until_completed() blocks Rayon
-    // worker threads, causing worse parallel throughput than CPU fallback.
-    // The coalesced shader code is kept for future async dispatch optimization.
+    // Large trees (height > 20): GPU is ~10-15% slower than multi-core CPU at these sizes
+    // due to UMA memory bandwidth saturation — CPU Rayon parallelism wins.
     if cap_height == tree_height || tree_height < 13 || tree_height > 20 {
         fill_digests_buf::<F, H>(digests_buf, cap_buf, leaves, leaf_size, cap_height);
         return;
@@ -515,19 +512,12 @@ fn fill_digests_buf_metal<F: RichField, H: Hasher<F>>(
         std::slice::from_raw_parts(leaves.as_ptr() as *const GoldilocksField, leaves.len())
     };
 
-    // Use zero-copy UMA buffer when possible (page-aligned data),
-    // falling back to memcpy if not aligned.
-    let (gpu_digests, gpu_caps) = autoreleasepool(|| {
-        let leaves_buf = RUNTIME.wrap_or_copy(leaves_gl);
-        let result = RUNTIME.hash_merkle_tree_linear_threadgroup_buf_ho(
-            leaves_buf,
-            tree_height,
-            leaf_size,
-            cap_height,
-        );
-        track_deallocation(leaves_gl.len() * std::mem::size_of::<GoldilocksField>());
-        result
-    });
+    // Buffer allocation uses Device which is Mutex-protected, safe from any thread.
+    // GPU command buffer submission is serialized by the dedicated dispatch thread.
+    let leaves_buf = RUNTIME.wrap_or_copy(leaves_gl);
+    let (gpu_digests, gpu_caps) = gpu_thread::GPU_DISPATCHER
+        .dispatch_merkle_linear_threadgroup(leaves_buf, tree_height, leaf_size, cap_height);
+    track_deallocation(leaves_gl.len() * std::mem::size_of::<GoldilocksField>());
 
     // Safety: HashOut<GoldilocksField> and H::Hash have identical memory layout
     // when H::HASHER_TYPE == Poseidon (both are [u64; 4]).
