@@ -53,6 +53,8 @@ pub struct MetalNTT {
     f_butterfly: Function,
     f_butterfly_inv: Function,
     f_scale: Function,
+    f_batch_bit_reverse: Function,
+    f_batch_butterfly: Function,
     twiddle_factors: Buffer,
     inv_twiddle_factors: Buffer,
     n_inverses: Buffer,
@@ -71,6 +73,8 @@ pub static NTT_RUNTIME: Lazy<MetalNTT> = Lazy::new(|| {
     let f_butterfly = lib.get_function("ntt_butterfly", None).unwrap();
     let f_butterfly_inv = lib.get_function("intt_butterfly", None).unwrap();
     let f_scale = lib.get_function("ntt_scale", None).unwrap();
+    let f_batch_bit_reverse = lib.get_function("ntt_batch_bit_reverse", None).unwrap();
+    let f_batch_butterfly = lib.get_function("ntt_batch_butterfly", None).unwrap();
 
     // Precompute twiddle factors for all supported sizes
     let (twiddles, inv_twiddles, n_invs) = precompute_twiddles(&device, MAX_LOG_N);
@@ -82,6 +86,8 @@ pub static NTT_RUNTIME: Lazy<MetalNTT> = Lazy::new(|| {
         f_butterfly,
         f_butterfly_inv,
         f_scale,
+        f_batch_bit_reverse,
+        f_batch_butterfly,
         twiddle_factors: twiddles,
         inv_twiddle_factors: inv_twiddles,
         n_inverses: n_invs,
