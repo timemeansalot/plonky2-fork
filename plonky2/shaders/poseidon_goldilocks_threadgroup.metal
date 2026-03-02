@@ -12,6 +12,7 @@
 #include "goldilocks.metal"
 #include "u128.h.metal"
 #include "poseidon_goldilocks_mds.metal"
+#include "poseidon_fast_partial_constants.metal"
 
 using namespace metal;
 namespace GoldilocksField {
