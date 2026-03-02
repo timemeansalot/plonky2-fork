@@ -20,7 +20,26 @@ All times are `prove_min` in milliseconds, d13-d17, 3 iterations each.
 
 ## Iteration Log
 
-Results will be appended here after each optimization attempt.
+Results appended after each optimization attempt.
+
+### Iteration 1: Batched single-buffer NTT (2026-03-02)
+
+| Degree | Merkle Only | Merkle + Batched NTT | Delta vs Merkle Only |
+|--------|-------------|---------------------|---------------------|
+| d13    | 227         | 273                 | +20% (worse)        |
+| d14    | 464         | 565                 | +22% (worse)        |
+| d15    | 917         | 1189                | +30% (worse)        |
+| d16    | 1937        | 2614                | +35% (worse)        |
+| d17    | 4916        | 6710                | +36% (worse)        |
+
+**E2E correctness:** PASS (test_metal_proof_roundtrip)
+**Changes:** Batched NTT — all ~72 polys packed into single contiguous GPU buffer, one command buffer with batch_bit_reverse + log_n batch_butterfly dispatches, single commit+wait.
+**Observations:**
+- GPU NTT is fundamentally slower than CPU Rayon parallel FFT at these sizes
+- At d17, batch NTT for wires commitment alone takes 2.37s (72 polys × 2^20)
+- The bottleneck is NOT dispatch overhead (we eliminated that) — it's raw GPU compute throughput
+- Apple Silicon GPU has fewer ALUs than 8-12 CPU cores running Rayon; NTT is compute-bound, not memory-bound
+- **Decision: revert routing, keep infrastructure disabled.** Merkle-only remains the best configuration.
 
 <!-- TEMPLATE for new iterations:
 ### Iteration N: <description> (YYYY-MM-DD)

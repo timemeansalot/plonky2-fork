@@ -263,22 +263,22 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         timing: &mut TimingTree,
         fft_root_table: Option<&FftRootTable<F>>,
     ) -> Self {
-        #[cfg(feature = "metal")]
-        {
-            let degree = polynomials[0].len();
-            let log_n = log2_strict(degree);
-            // Use Metal NTT for sizes where GPU batching outperforms CPU
-            if log_n + rate_bits >= 16 {
-                return Self::from_coeffs_metal(
-                    polynomials,
-                    rate_bits,
-                    blinding,
-                    cap_height,
-                    timing,
-                    fft_root_table,
-                );
-            }
-        }
+        // Metal batched NTT available but currently disabled:
+        // GPU NTT is slower than CPU Rayon at d13-d17 sizes (~72 polys of 2^17-2^20).
+        // Benchmarks show +20-36% regression vs Merkle-only.
+        // Infrastructure kept in from_coeffs_metal() for future optimization.
+        // To re-enable: uncomment the block below.
+        //
+        // #[cfg(feature = "metal")]
+        // {
+        //     let degree = polynomials[0].len();
+        //     let log_n = log2_strict(degree);
+        //     if log_n + rate_bits >= 16 {
+        //         return Self::from_coeffs_metal(
+        //             polynomials, rate_bits, blinding, cap_height, timing, fft_root_table,
+        //         );
+        //     }
+        // }
         Self::from_coeffs_cpu(
             polynomials,
             rate_bits,
