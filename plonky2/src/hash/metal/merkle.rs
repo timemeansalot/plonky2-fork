@@ -26,6 +26,9 @@ impl MetalRuntime {
             "cap height must be less than tree height"
         );
 
+        #[cfg(feature = "timing")]
+        let gt0 = std::time::Instant::now();
+
         let num_caps = 1usize << cap_height;
         let subtree_leaves_len = leaf_count >> cap_height;
         // Use plonky2-fork's BFS layout: 2*(n-1) digests per subtree (no root slot).
@@ -59,6 +62,9 @@ impl MetalRuntime {
                 std::ptr::write_bytes(ptr, 0, Self::align_to_256(caps_size));
             }
         }
+
+        #[cfg(feature = "timing")]
+        let gt1 = std::time::Instant::now();
 
         // Get pipeline states for linear+threadgroup kernels
         let pipeline_hash_leaves =
@@ -205,8 +211,14 @@ impl MetalRuntime {
             // uniforms_buffer RAII: auto-tracks deallocation on drop
         }
 
+        #[cfg(feature = "timing")]
+        let gt2 = std::time::Instant::now();
+
         command_buffer.commit();
         command_buffer.wait_until_completed();
+
+        #[cfg(feature = "timing")]
+        let gt3 = std::time::Instant::now();
 
         // GPU wrote directly in plonky2-fork BFS layout — read directly, no conversion needed.
         let digests_ptr = (*digests_buffer).contents() as *const HashOut<GoldilocksField>;
@@ -219,6 +231,20 @@ impl MetalRuntime {
         // Return TrackedBuffers to pool for reuse
         self.return_tracked_buffer(digests_buffer);
         self.return_tracked_buffer(caps_buffer);
+
+        #[cfg(feature = "timing")]
+        {
+            let gt4 = std::time::Instant::now();
+            eprintln!(
+                "[merkle-gpu-inner h={} linear_tg] alloc={:.1}ms encode={:.1}ms execute={:.1}ms readback={:.1}ms total={:.1}ms",
+                tree_height,
+                gt1.duration_since(gt0).as_secs_f64() * 1000.0,
+                gt2.duration_since(gt1).as_secs_f64() * 1000.0,
+                gt3.duration_since(gt2).as_secs_f64() * 1000.0,
+                gt4.duration_since(gt3).as_secs_f64() * 1000.0,
+                gt4.duration_since(gt0).as_secs_f64() * 1000.0,
+            );
+        }
 
         (digests, caps)
     }
@@ -243,6 +269,9 @@ impl MetalRuntime {
             cap_height < tree_height,
             "cap height must be less than tree height"
         );
+
+        #[cfg(feature = "timing")]
+        let gt0 = std::time::Instant::now();
 
         let num_caps = 1usize << cap_height;
         let subtree_leaves_len = leaf_count >> cap_height;
@@ -272,6 +301,9 @@ impl MetalRuntime {
                 std::ptr::write_bytes(ptr, 0, Self::align_to_256(caps_size));
             }
         }
+
+        #[cfg(feature = "timing")]
+        let gt1 = std::time::Instant::now();
 
         // Get coalesced pipeline states
         let pipeline_hash_leaves = self.get_poseidon_hash_leaves_coalesced_pipeline_state();
@@ -443,9 +475,15 @@ impl MetalRuntime {
             encoder.end_encoding();
         }
 
+        #[cfg(feature = "timing")]
+        let gt2 = std::time::Instant::now();
+
         // Single commit and wait for all work
         command_buffer.commit();
         command_buffer.wait_until_completed();
+
+        #[cfg(feature = "timing")]
+        let gt3 = std::time::Instant::now();
 
         // GPU wrote directly in plonky2-fork BFS layout — read directly, no conversion needed.
         let digests_ptr = (*digests_buffer).contents() as *const HashOut<GoldilocksField>;
@@ -458,6 +496,20 @@ impl MetalRuntime {
         // Return TrackedBuffers to pool for reuse
         self.return_tracked_buffer(digests_buffer);
         self.return_tracked_buffer(caps_buffer);
+
+        #[cfg(feature = "timing")]
+        {
+            let gt4 = std::time::Instant::now();
+            eprintln!(
+                "[merkle-gpu-inner h={} coalesced] alloc={:.1}ms encode={:.1}ms execute={:.1}ms readback={:.1}ms total={:.1}ms",
+                tree_height,
+                gt1.duration_since(gt0).as_secs_f64() * 1000.0,
+                gt2.duration_since(gt1).as_secs_f64() * 1000.0,
+                gt3.duration_since(gt2).as_secs_f64() * 1000.0,
+                gt4.duration_since(gt3).as_secs_f64() * 1000.0,
+                gt4.duration_since(gt0).as_secs_f64() * 1000.0,
+            );
+        }
 
         (digests, caps)
     }
