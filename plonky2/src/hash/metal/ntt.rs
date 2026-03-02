@@ -421,6 +421,122 @@ impl MetalNTT {
         command_buffer.wait_until_completed();
     }
 
+    /// Perform batched NTT/INTT in place on a buffer containing `batch_count` polynomials
+    /// of size `n` each, laid out contiguously: [poly0|poly1|...|polyN].
+    fn batch_ntt_in_place(
+        &self,
+        data_buffer: &Buffer,
+        n: usize,
+        log_n: usize,
+        batch_count: usize,
+        inverse: bool,
+    ) {
+        let device = self.device.lock().unwrap();
+
+        // Create pipeline states from cached functions
+        let pipeline_bit_reverse = device
+            .new_compute_pipeline_state_with_function(&self.f_batch_bit_reverse)
+            .unwrap();
+
+        let pipeline_butterfly = if inverse {
+            panic!("Batch inverse NTT not yet implemented");
+        } else {
+            device
+                .new_compute_pipeline_state_with_function(&self.f_batch_butterfly)
+                .unwrap()
+        };
+
+        drop(device); // Release lock before command buffer operations
+
+        let command_buffer = self.command_queue.new_command_buffer();
+
+        // Phase 1: Batch bit-reversal permutation
+        {
+            let uniforms = NTTUniforms {
+                n: n as u32,
+                log_n: log_n as u32,
+                stage: 0,
+                direction: 0,
+                twiddle_stride: 0,
+            };
+            let batch_count_u32 = batch_count as u32;
+
+            let encoder = command_buffer
+                .compute_command_encoder_with_descriptor(ComputePassDescriptor::new());
+            encoder.set_compute_pipeline_state(&pipeline_bit_reverse);
+            encoder.set_buffer(0, Some(data_buffer), 0);
+            encoder.set_bytes(
+                1,
+                std::mem::size_of::<NTTUniforms>() as u64,
+                &uniforms as *const _ as *const _,
+            );
+            encoder.set_bytes(2, 4, &batch_count_u32 as *const _ as *const _);
+
+            let total_elements = batch_count * n;
+            let threads_per_group = pipeline_bit_reverse.thread_execution_width() as usize;
+            let num_groups = (total_elements + threads_per_group - 1) / threads_per_group;
+            encoder.dispatch_thread_groups(
+                MTLSize {
+                    width: num_groups as u64,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: threads_per_group as u64,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            encoder.end_encoding();
+        }
+
+        // Phase 2: Batch butterfly stages
+        let twiddle_stride = (1 << self.max_log_n) / n;
+
+        for stage in 0..log_n {
+            let uniforms = NTTUniforms {
+                n: n as u32,
+                log_n: log_n as u32,
+                stage: stage as u32,
+                direction: 0,
+                twiddle_stride: twiddle_stride as u32,
+            };
+            let batch_count_u32 = batch_count as u32;
+
+            let encoder = command_buffer
+                .compute_command_encoder_with_descriptor(ComputePassDescriptor::new());
+            encoder.set_compute_pipeline_state(&pipeline_butterfly);
+            encoder.set_buffer(0, Some(data_buffer), 0);
+            encoder.set_buffer(1, Some(&self.twiddle_factors), 0);
+            encoder.set_bytes(
+                2,
+                std::mem::size_of::<NTTUniforms>() as u64,
+                &uniforms as *const _ as *const _,
+            );
+            encoder.set_bytes(3, 4, &batch_count_u32 as *const _ as *const _);
+
+            let total_butterflies = batch_count * (n / 2);
+            let threads_per_group = pipeline_butterfly.thread_execution_width() as usize;
+            let num_groups = (total_butterflies + threads_per_group - 1) / threads_per_group;
+            encoder.dispatch_thread_groups(
+                MTLSize {
+                    width: num_groups as u64,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: threads_per_group as u64,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            encoder.end_encoding();
+        }
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+    }
+
     /// Perform Low Degree Extension (LDE) on polynomial values
     ///
     /// Takes evaluations of a polynomial on a subgroup H and returns evaluations
@@ -744,5 +860,68 @@ mod tests {
     #[test]
     fn test_lde_onto_coset_2_18_rate_3() {
         test_lde_onto_coset_at_size(18, 3);
+    }
+
+    /// Test that batch NTT produces the same results as individual NTTs
+    #[test]
+    fn test_batch_ntt_correctness() {
+        let log_n = 16;
+        let n = 1usize << log_n;
+        let batch_count = 8;
+
+        // Create batch_count different polynomials
+        let polys: Vec<Vec<GoldilocksField>> = (0..batch_count)
+            .map(|b| {
+                (0..n)
+                    .map(|i| {
+                        GoldilocksField::from_canonical_u64(
+                            ((b * n + i) as u64) % GoldilocksField::ORDER,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Individual NTTs
+        let individual_results: Vec<Vec<GoldilocksField>> =
+            polys.iter().map(|p| NTT_RUNTIME.ntt(p)).collect();
+
+        // Pack into contiguous buffer
+        let mut packed: Vec<GoldilocksField> = Vec::with_capacity(batch_count * n);
+        for poly in &polys {
+            packed.extend_from_slice(poly);
+        }
+
+        // Create GPU buffer
+        let buffer_size = packed.len() * std::mem::size_of::<u64>();
+        let data_buffer = NTT_RUNTIME.device.lock().unwrap().new_buffer_with_data(
+            packed.as_ptr() as *const _,
+            buffer_size as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Batch NTT in place
+        NTT_RUNTIME.batch_ntt_in_place(&data_buffer, n, log_n, batch_count, false);
+
+        // Read back results
+        let ptr = data_buffer.contents() as *const GoldilocksField;
+        let result = unsafe { std::slice::from_raw_parts(ptr, batch_count * n) };
+
+        // Compare each polynomial
+        for b in 0..batch_count {
+            for i in 0..n {
+                assert_eq!(
+                    result[b * n + i],
+                    individual_results[b][i],
+                    "Batch NTT mismatch at poly={}, index={}",
+                    b,
+                    i
+                );
+            }
+        }
+        println!(
+            "Batch NTT: {} polys of size 2^{} all match individual NTTs",
+            batch_count, log_n
+        );
     }
 }
