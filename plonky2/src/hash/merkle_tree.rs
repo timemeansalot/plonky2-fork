@@ -194,6 +194,74 @@ fn fill_subtree<F: RichField, H: Hasher<F>>(
     hash
 }
 
+#[cfg(feature = "timing")]
+fn fill_subtree_timed<F: RichField, H: Hasher<F>>(
+    digests_buf: &mut [MaybeUninit<H::Hash>],
+    leaves: &[F],
+    leaf_size: usize,
+    leaf_nanos: &std::sync::atomic::AtomicU64,
+    internal_nanos: &std::sync::atomic::AtomicU64,
+) -> H::Hash {
+    let leaves_count = leaves.len() / leaf_size;
+
+    if leaves_count <= 2 {
+        return fill_subtree::<F, H>(digests_buf, leaves, leaf_size);
+    }
+
+    assert_eq!(leaves_count, digests_buf.len() / 2 + 1);
+
+    // Phase 1: leaf hashing
+    let t0 = std::time::Instant::now();
+    let (_, digests_leaves) = digests_buf.split_at_mut(digests_buf.len() - leaves_count);
+    digests_leaves
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(leaf_idx, digest)| {
+            let (_, r) = leaves.split_at(leaf_idx * leaf_size);
+            let (leaf, _) = r.split_at(leaf_size);
+            digest.write(H::hash_or_noop(leaf));
+        });
+    let t1 = std::time::Instant::now();
+
+    // Phase 2: internal nodes
+    let mut last_index = digests_buf.len() - leaves_count;
+    for level_log in range(1, log2_strict(leaves_count)).rev() {
+        let level_size = 1 << level_log;
+        let (_, digests_slice) = digests_buf.split_at_mut(last_index - level_size);
+        let (digests_slice, next_digests) = digests_slice.split_at_mut(level_size);
+        digests_slice
+            .into_par_iter()
+            .zip(last_index - level_size..last_index)
+            .for_each(|(digest, idx)| {
+                let left_idx = 2 * (idx + 1) - last_index;
+                let right_idx = left_idx + 1;
+                unsafe {
+                    let left_digest = next_digests[left_idx].assume_init();
+                    let right_digest = next_digests[right_idx].assume_init();
+                    digest.write(H::two_to_one(left_digest, right_digest));
+                }
+            });
+        last_index -= level_size;
+    }
+    let t2 = std::time::Instant::now();
+
+    leaf_nanos.fetch_add(
+        t1.duration_since(t0).as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    internal_nanos.fetch_add(
+        t2.duration_since(t1).as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    // Return cap hash
+    unsafe {
+        let left_digest = digests_buf[0].assume_init();
+        let right_digest = digests_buf[1].assume_init();
+        H::two_to_one(left_digest, right_digest)
+    }
+}
+
 fn fill_digests_buf<F: RichField, H: Hasher<F>>(
     digests_buf: &mut [MaybeUninit<H::Hash>],
     cap_buf: &mut [MaybeUninit<H::Hash>],
@@ -219,6 +287,13 @@ fn fill_digests_buf<F: RichField, H: Hasher<F>>(
         return;
     }
 
+    #[cfg(feature = "timing")]
+    let cpu_t0 = std::time::Instant::now();
+    #[cfg(feature = "timing")]
+    let leaf_nanos = std::sync::atomic::AtomicU64::new(0);
+    #[cfg(feature = "timing")]
+    let internal_nanos = std::sync::atomic::AtomicU64::new(0);
+
     let subtree_digests_len = digests_buf.len() >> cap_height;
     let subtree_leaves_len = leaves_count >> cap_height;
     let digests_chunks = digests_buf.par_chunks_exact_mut(subtree_digests_len);
@@ -227,16 +302,45 @@ fn fill_digests_buf<F: RichField, H: Hasher<F>>(
     assert_eq!(digests_chunks.len(), leaves_chunks.len());
     digests_chunks.zip(cap_buf).zip(leaves_chunks).for_each(
         |((subtree_digests, subtree_cap), subtree_leaves)| {
-            // We have `1 << cap_height` sub-trees, one for each entry in `cap`. They are totally
-            // independent, so we schedule one task for each. `digests_buf` and `leaves` are split
-            // into `1 << cap_height` slices, one for each sub-tree.
-            subtree_cap.write(fill_subtree::<F, H>(
-                subtree_digests,
-                subtree_leaves,
-                leaf_size,
-            ));
+            #[cfg(feature = "timing")]
+            {
+                subtree_cap.write(fill_subtree_timed::<F, H>(
+                    subtree_digests,
+                    subtree_leaves,
+                    leaf_size,
+                    &leaf_nanos,
+                    &internal_nanos,
+                ));
+            }
+            #[cfg(not(feature = "timing"))]
+            {
+                subtree_cap.write(fill_subtree::<F, H>(
+                    subtree_digests,
+                    subtree_leaves,
+                    leaf_size,
+                ));
+            }
         },
     );
+
+    #[cfg(feature = "timing")]
+    {
+        let cpu_total = cpu_t0.elapsed();
+        let leaves_count = leaves.len() / leaf_size;
+        let tree_height = log2_strict(leaves_count);
+        let leaf_ms =
+            leaf_nanos.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
+        let internal_ms =
+            internal_nanos.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
+        eprintln!(
+            "[merkle-cpu h={}] leaf_hash={:.1}ms internal_nodes={:.1}ms wall={:.1}ms subtrees={}",
+            tree_height,
+            leaf_ms,
+            internal_ms,
+            cpu_total.as_secs_f64() * 1000.0,
+            1usize << cap_height,
+        );
+    }
 
     // TODO - debug code - to remove in future
     /*
