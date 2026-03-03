@@ -4,8 +4,8 @@
 
 | Component | Range | Status | Speedup |
 |-----------|-------|--------|---------|
-| Merkle — linear+threadgroup | tree_height 13..=20 | **Active** | 28-49% faster than CPU |
-| Merkle — coalesced | tree_height == 21 | **Active** | ~0% (UMA bandwidth-limited at d18) |
+| Merkle — linear+threadgroup | tree_height 13..=20 | **Active** | 39-44% faster than CPU |
+| Merkle — coalesced | tree_height == 21 | **Active** | ~11% faster (noisy, bandwidth-limited) |
 | Merkle — coalesced | tree_height >= 22 | **Disabled** (UMA bandwidth cliff, GPU 2x slower) | N/A |
 | NTT/LDE (batched) | log_n + rate_bits >= 16 | **Disabled** (20-36% slower; GPU ALU < CPU Rayon for 64-bit math) | N/A |
 | Merkle — CPU fallback | tree_height < 13 or >= 22, all-cap, non-Poseidon | **Active** | baseline |
@@ -168,19 +168,19 @@ rm poseidon_merkle_hasher_coalesced.air
 
 ## Performance Results
 
-Best-of-3 prove_min on Apple M-series. Benchmarked 2026-03-03 after constant-space Poseidon optimization.
+Best-of-all prove_min across 3 sessions on Apple M-series. Benchmarked 2026-03-03 after constant-space Poseidon optimization.
 
 | Degree | CPU prove_min | Metal prove_min | Speedup | GPU Path |
 |--------|--------------|-----------------|---------|----------|
-| d13 | 267ms | 185ms | **1.44x** | linear+threadgroup |
-| d14 | 549ms | 369ms | **1.49x** | linear+threadgroup |
-| d15 | 1,086ms | 783ms | **1.39x** | linear+threadgroup |
-| d16 | 2,238ms | 1,618ms | **1.38x** | linear+threadgroup |
-| d17 | 4,846ms | 3,496ms | **1.39x** | linear+threadgroup |
-| d18 | 13,656ms | 13,944ms | ~1.0x | coalesced |
+| d13 | 261ms | 185ms | **1.41x** | linear+threadgroup |
+| d14 | 533ms | 369ms | **1.44x** | linear+threadgroup |
+| d15 | 1,086ms | 776ms | **1.40x** | linear+threadgroup |
+| d16 | 2,238ms | 1,609ms | **1.39x** | linear+threadgroup |
+| d17 | 4,826ms | 3,434ms | **1.40x** | linear+threadgroup |
+| d18 | 13,656ms | 12,289ms | **1.11x** | coalesced |
 | d19 | — | — | CPU fallback | CPU (tree_height=22) |
 
-Metal is 38-49% faster for d13-d17 (linear+threadgroup). d18 (coalesced path) is UMA bandwidth-limited with no meaningful speedup. At d19+ the GPU hits a UMA bandwidth cliff — CPU fallback is used.
+Metal is 39-44% faster for d13-d17 (linear+threadgroup, very stable across runs). d18 (coalesced path) shows ~11% speedup but is noisy due to UMA bandwidth saturation and thermal variance (individual runs range from 0.97x to 1.24x). At d19+ the GPU hits a UMA bandwidth cliff — CPU fallback is used.
 
 ### Optimization History
 
