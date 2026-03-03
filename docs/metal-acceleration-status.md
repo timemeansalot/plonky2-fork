@@ -4,8 +4,8 @@
 
 | Component | Range | Status | Speedup |
 |-----------|-------|--------|---------|
-| Merkle — linear+threadgroup | tree_height 13..=20 | **Active** | 16-28% faster than CPU |
-| Merkle — coalesced | tree_height == 21 | **Active** | 12-14% faster than CPU |
+| Merkle — linear+threadgroup | tree_height 13..=20 | **Active** | 28-49% faster than CPU |
+| Merkle — coalesced | tree_height == 21 | **Active** | ~0% (UMA bandwidth-limited at d18) |
 | Merkle — coalesced | tree_height >= 22 | **Disabled** (UMA bandwidth cliff, GPU 2x slower) | N/A |
 | NTT/LDE (batched) | log_n + rate_bits >= 16 | **Disabled** (20-36% slower; GPU ALU < CPU Rayon for 64-bit math) | N/A |
 | Merkle — CPU fallback | tree_height < 13 or >= 22, all-cap, non-Poseidon | **Active** | baseline |
@@ -52,7 +52,7 @@ Infrastructure for GPU batched NTT exists in `from_coeffs_metal()` and `ntt.rs:b
 | File | Status |
 |------|--------|
 | `poseidon_merkle_hasher_linear_threadgroup.metallib` | **Active** — embedded in `runtime.rs` |
-| `poseidon_merkle_hasher_coalesced.metallib` | **Loaded but not dispatched** |
+| `poseidon_merkle_hasher_coalesced.metallib` | **Active** — embedded in `runtime.rs` |
 | `ntt_goldilocks.metallib` | **Active** — embedded in `ntt.rs` |
 | `poseidon_merkle_hasher_linear_threadgroup.metal` | Source for linear+threadgroup shader |
 | `poseidon_merkle_hasher_coalesced.metal` | Source for coalesced shader |
@@ -168,16 +168,27 @@ rm poseidon_merkle_hasher_coalesced.air
 
 ## Performance Results
 
-See [metal-bfs-layout-optimization.md](metal-bfs-layout-optimization.md) for detailed benchmarks.
+Best-of-3 prove_min on Apple M-series. Benchmarked 2026-03-03 after constant-space Poseidon optimization.
 
 | Degree | CPU prove_min | Metal prove_min | Speedup | GPU Path |
 |--------|--------------|-----------------|---------|----------|
-| d13 | 277ms | 217ms | **1.28x** | linear+threadgroup |
-| d14 | 563ms | 452ms | **1.25x** | linear+threadgroup |
-| d15 | 1.11s | 931ms | **1.20x** | linear+threadgroup |
-| d16 | 2.25s | 1.94s | **1.16x** | linear+threadgroup |
-| d17 | 4.93s | 4.24s | **1.16x** | linear+threadgroup |
-| d18 | 17.8s | 15.7s | **1.13x** | coalesced |
-| d19 | 99s | — | CPU fallback | CPU (tree_height=22) |
+| d13 | 267ms | 185ms | **1.44x** | linear+threadgroup |
+| d14 | 549ms | 369ms | **1.49x** | linear+threadgroup |
+| d15 | 1,086ms | 783ms | **1.39x** | linear+threadgroup |
+| d16 | 2,238ms | 1,618ms | **1.38x** | linear+threadgroup |
+| d17 | 4,846ms | 3,496ms | **1.39x** | linear+threadgroup |
+| d18 | 13,656ms | 13,944ms | ~1.0x | coalesced |
+| d19 | — | — | CPU fallback | CPU (tree_height=22) |
 
-Metal is 16-28% faster for d13-d17 (linear+threadgroup) and 12-14% faster at d18 (coalesced). At d19+ the GPU hits a UMA bandwidth cliff — CPU fallback is used.
+Metal is 38-49% faster for d13-d17 (linear+threadgroup). d18 (coalesced path) is UMA bandwidth-limited with no meaningful speedup. At d19+ the GPU hits a UMA bandwidth cliff — CPU fallback is used.
+
+### Optimization History
+
+| Date | Change | Impact |
+|------|--------|--------|
+| 2026-03-02 | Linear+threadgroup shader, BFS layout | 16-28% speedup (d13-d17) |
+| 2026-03-02 | Coalesced shader for d18 | 12-14% speedup (d18) |
+| 2026-03-03 | Constant-space Poseidon reads (no TG memory) | Additional 15-20% GPU speedup (d13-d17) |
+| 2026-03-03 | Fast partial rounds (tried, reverted) | No GPU improvement |
+| 2026-03-03 | Remove shared_children (tried, reverted) | No improvement |
+| 2026-03-03 | Sequential MDS halves (tried, reverted) | No improvement |

@@ -141,7 +141,9 @@ Apple Silicon GPU acceleration via the Metal API. Priority: CUDA > Metal > CPU. 
 
 **Routing:**
 - Merkle: GPU for tree_height 13..=21 (Poseidon only), CPU otherwise
-- NTT: GPU for log_n + rate_bits >= 16, CPU otherwise
+- NTT: disabled (GPU 20-36% slower than CPU Rayon)
+
+**Performance:** Metal is 38-49% faster than CPU for d13-d17. Poseidon constants are read from Metal's constant address space (hardware L1-cached), no threadgroup memory needed.
 
 **Key modules:** `runtime.rs` (device/pipelines), `gpu_thread.rs` (dedicated dispatch thread), `merkle.rs` (Merkle hashing), `ntt.rs` (NTT/LDE), `buffer_pool.rs` (buffer reuse).
 
