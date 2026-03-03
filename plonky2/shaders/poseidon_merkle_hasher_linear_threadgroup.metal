@@ -70,14 +70,12 @@ kernel void poseidon_hash_leaves_linear_threadgroup(
     uint local_id = lid[0];
     uint num_threads_in_group = tg_size[0];
 
-    // Split threadgroup memory: round constants, MDS constants, then fast partial constants
+    // Split threadgroup memory: round constants then MDS constants
     threadgroup ulong * tg_round_constants = tg_memory;
     threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-    threadgroup ulong * tg_fast_partial = tg_memory + POSEIDON_RC_TOTAL + MDS_CONST_TOTAL;
 
     // Cooperatively load all constants into threadgroup memory
     load_all_constants_tg(local_id, num_threads_in_group, tg_round_constants, tg_mds_constants);
-    load_fast_partial_constants_tg(local_id, num_threads_in_group, tg_fast_partial);
 
     // Synchronize to ensure all constants are loaded
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -133,8 +131,8 @@ kernel void poseidon_hash_leaves_linear_threadgroup(
             p2_state[6] = leaf_inputs[offset + 6];
             p2_state[7] = leaf_inputs[offset + 7];
 
-            // Use fast partial round optimization (RC + MDS + fast partial)
-            poseidon_permute_tg_fast_partial(p2_state, tg_round_constants, tg_mds_constants, tg_fast_partial);
+            // Use full threadgroup-cached constants (RC + MDS)
+            poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
             offset += 8;
         }
 
@@ -143,7 +141,7 @@ kernel void poseidon_hash_leaves_linear_threadgroup(
             for (uint i = 0; i < remaining; i++) {
                 p2_state[i] = leaf_inputs[offset + i];
             }
-            poseidon_permute_tg_fast_partial(p2_state, tg_round_constants, tg_mds_constants, tg_fast_partial);
+            poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
         }
 
         output[output_offset] = static_cast<ulong>(p2_state[0]);
@@ -167,16 +165,14 @@ kernel void poseidon_hash_tree_level_linear_threadgroup(
     uint local_id = lid[0];
     uint num_threads_in_group = tg_size[0];
 
-    // Split threadgroup memory: RC + MDS + fast partial constants, then child cache
-    // Layout: [0..359] = round constants, [360..371] = MDS, [372..1010] = fast partial, [1011+] = child cache
+    // Split threadgroup memory: RC + MDS constants, then child cache
+    // Layout: [0..359] = round constants, [360..371] = MDS, [372+] = child cache
     threadgroup ulong * tg_round_constants = tg_memory;
     threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-    threadgroup ulong * tg_fast_partial = tg_memory + POSEIDON_RC_TOTAL + MDS_CONST_TOTAL;
-    threadgroup ulong * shared_children = tg_memory + POSEIDON_RC_TOTAL + MDS_CONST_TOTAL + FAST_PARTIAL_CONST_TOTAL;
+    threadgroup ulong * shared_children = tg_memory + POSEIDON_RC_TOTAL + MDS_CONST_TOTAL;
 
     // Cooperatively load all constants into threadgroup memory
     load_all_constants_tg(local_id, num_threads_in_group, tg_round_constants, tg_mds_constants);
-    load_fast_partial_constants_tg(local_id, num_threads_in_group, tg_fast_partial);
 
     // Synchronize to ensure all constants are loaded
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -264,8 +260,8 @@ kernel void poseidon_hash_tree_level_linear_threadgroup(
     p2_state[10] = 0;
     p2_state[11] = 0;
 
-    // Use fast partial round optimization (RC + MDS + fast partial)
-    poseidon_permute_tg_fast_partial(p2_state, tg_round_constants, tg_mds_constants, tg_fast_partial);
+    // Use full threadgroup-cached constants (RC + MDS)
+    poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
 
     // Calculate parent index (where we write)
     uint parent_idx = compute_linear_internal_index_tg(
@@ -295,14 +291,12 @@ kernel void poseidon_hash_caps_linear_threadgroup(
     uint lid[[thread_position_in_threadgroup]],
     uint tg_size[[threads_per_threadgroup]]
 ) {
-    // Split threadgroup memory: round constants, MDS constants, then fast partial constants
+    // Split threadgroup memory: round constants then MDS constants
     threadgroup ulong * tg_round_constants = tg_memory;
     threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-    threadgroup ulong * tg_fast_partial = tg_memory + POSEIDON_RC_TOTAL + MDS_CONST_TOTAL;
 
     // Cooperatively load all constants into threadgroup memory
     load_all_constants_tg(lid, tg_size, tg_round_constants, tg_mds_constants);
-    load_fast_partial_constants_tg(lid, tg_size, tg_fast_partial);
 
     // Synchronize to ensure all constants are loaded
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -334,8 +328,8 @@ kernel void poseidon_hash_caps_linear_threadgroup(
     p2_state[10] = 0;
     p2_state[11] = 0;
 
-    // Use fast partial round optimization (RC + MDS + fast partial)
-    poseidon_permute_tg_fast_partial(p2_state, tg_round_constants, tg_mds_constants, tg_fast_partial);
+    // Use full threadgroup-cached constants (RC + MDS)
+    poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
 
     // Write cap hash
     uint cap_offset = gid * 4;

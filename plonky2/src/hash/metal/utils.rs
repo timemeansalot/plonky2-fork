@@ -36,9 +36,7 @@ pub struct CoalescedUniforms {
 /// Poseidon threadgroup memory constants (must match shader).
 pub const POSEIDON_RC_SIZE: usize = 360 * std::mem::size_of::<u64>(); // 2880 bytes
 pub const POSEIDON_MDS_SIZE: usize = 12 * std::mem::size_of::<i64>(); // 96 bytes
-pub const POSEIDON_FAST_PARTIAL_SIZE: usize = 639 * std::mem::size_of::<u64>(); // 5112 bytes
-pub const POSEIDON_CONST_SIZE: usize =
-    POSEIDON_RC_SIZE + POSEIDON_MDS_SIZE + POSEIDON_FAST_PARTIAL_SIZE; // 8088 bytes
+pub const POSEIDON_CONST_SIZE: usize = POSEIDON_RC_SIZE + POSEIDON_MDS_SIZE; // 2976 bytes
 
 /// Copy raw data from a GPU buffer pointer into a new Vec.
 ///

@@ -153,8 +153,7 @@ namespace GoldilocksField
             unsigned long product_lo = bd + (adbc << 32);
             unsigned long product_lo_carry = product_lo < bd ? 1 : 0;
             unsigned long product_hi = (a * c) + (adbc >> 32) + (adbc_carry << 32) + product_lo_carry;
-            unsigned long result = reduce128(product_hi, product_lo);
-            return result >= N ? result - N : result;
+            return reduce128(product_hi, product_lo) % N;
         }
     };
 
