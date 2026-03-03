@@ -76,27 +76,12 @@ kernel void poseidon_hash_leaves_coalesced(
     constant Fp * leaf_inputs[[buffer(0)]],
     device ulong * output[[buffer(1)]],
     constant CoalescedUniforms & uniforms[[buffer(2)]],
-    threadgroup ulong * tg_memory[[threadgroup(0)]],
-    uint2 gid[[thread_position_in_grid]],
-    uint2 lid[[thread_position_in_threadgroup]],
-    uint2 tg_size[[threads_per_threadgroup]]
+    uint2 gid[[thread_position_in_grid]]
 ) {
     // 2D dispatch: gid[0] = node within subtree, gid[1] = relative subtree index in chunk
     // dispatch_offset is the first subtree index in this chunk
     uint in_subtree_idx = gid[0];
     uint subtree_idx = uniforms.dispatch_offset + gid[1];
-    uint local_id = lid[0];
-    uint num_threads_in_group = tg_size[0];
-
-    // Split threadgroup memory: round constants then MDS constants
-    threadgroup ulong * tg_round_constants = tg_memory;
-    threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-
-    // Cooperatively load all constants into threadgroup memory
-    load_all_constants_tg(local_id, num_threads_in_group, tg_round_constants, tg_mds_constants);
-
-    // Synchronize to ensure all constants are loaded
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Global leaf index using 2D coordinates
     uint leaf_idx = subtree_idx * uniforms.subtree_leaves_len + in_subtree_idx;
@@ -151,7 +136,7 @@ kernel void poseidon_hash_leaves_coalesced(
             p2_state[6] = leaf_inputs[offset + 6];
             p2_state[7] = leaf_inputs[offset + 7];
 
-            poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+            poseidon_permute_const(p2_state);
             offset += 8;
         }
 
@@ -160,7 +145,7 @@ kernel void poseidon_hash_leaves_coalesced(
             for (uint i = 0; i < remaining; i++) {
                 p2_state[i] = leaf_inputs[offset + i];
             }
-            poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+            poseidon_permute_const(p2_state);
         }
 
         output[output_offset] = static_cast<ulong>(p2_state[0]);
@@ -200,19 +185,8 @@ kernel void poseidon_hash_tree_level_coalesced(
     uint local_id = lid[0];
     uint num_threads_in_group = tg_size[0];
 
-    // Split threadgroup memory:
-    // [0..359] = round constants
-    // [360..371] = MDS constants
-    // [372+] = child hash cache (8 ulongs per thread = 2 children * 4 elements)
-    threadgroup ulong * tg_round_constants = tg_memory;
-    threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-    threadgroup ulong * shared_children = tg_memory + POSEIDON_RC_TOTAL + MDS_CONST_TOTAL;
-
-    // Cooperatively load all constants into threadgroup memory
-    load_all_constants_tg(local_id, num_threads_in_group, tg_round_constants, tg_mds_constants);
-
-    // Synchronize to ensure all constants are loaded
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Threadgroup memory used for child cache only (constants read from constant address space)
+    threadgroup ulong * shared_children = tg_memory;
 
     // Number of nodes at this level per subtree
     uint nodes_per_subtree = uniforms.nodes_per_subtree;
@@ -325,8 +299,7 @@ kernel void poseidon_hash_tree_level_coalesced(
     p2_state[10] = 0;
     p2_state[11] = 0;
 
-    // Use full threadgroup-cached constants (RC + MDS)
-    poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+    poseidon_permute_const(p2_state);
 
     // Calculate parent index (where we write)
     uint parent_idx = compute_coalesced_internal_index(
@@ -368,15 +341,10 @@ kernel void poseidon_hash_tree_level_coalesced_instrumented(
     uint local_id = lid[0];
     uint num_threads_in_group = tg_size[0];
 
-    // Split threadgroup memory
-    threadgroup ulong * tg_round_constants = tg_memory;
-    threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-    threadgroup ulong * shared_children = tg_memory + POSEIDON_RC_TOTAL + MDS_CONST_TOTAL;
+    // Threadgroup memory: child cache + address tracking (constants read from constant address space)
+    threadgroup ulong * shared_children = tg_memory;
     // Extra space for tracking addresses
     threadgroup uint * tg_addresses = (threadgroup uint *)(shared_children + num_threads_in_group * 8);
-
-    load_all_constants_tg(local_id, num_threads_in_group, tg_round_constants, tg_mds_constants);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     uint nodes_per_subtree = uniforms.nodes_per_subtree;
     bool is_active = (index_in_level < nodes_per_subtree && subtree_idx < uniforms.subtree_count);
@@ -457,7 +425,7 @@ kernel void poseidon_hash_tree_level_coalesced_instrumented(
     p2_state[10] = 0;
     p2_state[11] = 0;
 
-    poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+    poseidon_permute_const(p2_state);
 
     uint parent_idx = compute_coalesced_internal_index(
         uniforms.subtree_digests_len, uniforms.subtree_leaves_len,
@@ -471,25 +439,13 @@ kernel void poseidon_hash_tree_level_coalesced_instrumented(
 }
 
 // Kernel to compute cap hashes from subtree roots
+// Constants read from constant address space
 kernel void poseidon_hash_caps_coalesced(
     device ulong * caps_output[[buffer(0)]],
     device ulong * digests[[buffer(1)]],
     constant CoalescedUniforms & uniforms[[buffer(2)]],
-    threadgroup ulong * tg_memory[[threadgroup(0)]],
-    uint gid[[thread_position_in_grid]],
-    uint lid[[thread_position_in_threadgroup]],
-    uint tg_size[[threads_per_threadgroup]]
+    uint gid[[thread_position_in_grid]]
 ) {
-    // Split threadgroup memory: round constants then MDS constants
-    threadgroup ulong * tg_round_constants = tg_memory;
-    threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-
-    // Cooperatively load all constants into threadgroup memory
-    load_all_constants_tg(lid, tg_size, tg_round_constants, tg_mds_constants);
-
-    // Synchronize to ensure all constants are loaded
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
     if (gid >= uniforms.subtree_count) {
         return;
     }
@@ -517,8 +473,7 @@ kernel void poseidon_hash_caps_coalesced(
     p2_state[10] = 0;
     p2_state[11] = 0;
 
-    // Use full threadgroup-cached constants (RC + MDS)
-    poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+    poseidon_permute_const(p2_state);
 
     // Write cap hash
     uint cap_offset = gid * 4;

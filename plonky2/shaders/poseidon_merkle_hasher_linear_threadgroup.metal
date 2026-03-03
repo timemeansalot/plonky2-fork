@@ -1,17 +1,12 @@
-// Linear indexing + Threadgroup memory optimization for Merkle tree hashing
-// Combines zeknox-style linear layout with full threadgroup constant caching
+// Linear indexing Merkle tree hashing with constant-space Poseidon
+// Poseidon constants read directly from Metal's constant address space (hardware-cached).
+// Threadgroup memory used only for child hash caching in internal kernel.
 //
 // Memory Layout (for tree with 4 leaves in a subtree):
 // Linear Array:
 // Index:  [0]   [1]   [2]   [3]   [4]   [5]   [6]
 // Value:  H0123 H01   H23   L0    L1    L2    L3
 //         (root)(lvl1)(lvl1)(leaf)(leaf)(leaf)(leaf)
-//
-// Threadgroup memory is used to cache:
-// 1. Poseidon round constants (30 * 12 = 360 ulongs = 2880 bytes)
-// 2. MDS frequency constants (12 longs = 96 bytes)
-// 3. Child hash data for internal node computation (8 ulongs per thread)
-// Total: ~3KB constants + child cache (well within 32KB Metal limit)
 
 #include <metal_stdlib>
 #include "goldilocks.metal"
@@ -56,29 +51,14 @@ inline uint compute_linear_internal_index_tg(
     return subtree_idx * subtree_digests_len + level_start + index_in_level;
 }
 
-// Kernel to hash leaves with linear layout and full threadgroup-cached constants
+// Kernel to hash leaves with linear layout, constants read from constant address space
 kernel void poseidon_hash_leaves_linear_threadgroup(
     constant Fp * leaf_inputs[[buffer(0)]],
     device ulong * output[[buffer(1)]],
     constant LinearThreadgroupUniforms & uniforms[[buffer(2)]],
-    threadgroup ulong * tg_memory[[threadgroup(0)]],  // 360 ulongs for RC + 12 longs for MDS
-    uint2 gid[[thread_position_in_grid]],
-    uint2 lid[[thread_position_in_threadgroup]],
-    uint2 tg_size[[threads_per_threadgroup]]
+    uint2 gid[[thread_position_in_grid]]
 ) {
     uint thread_id = gid[1] * uniforms.grid_width + gid[0];
-    uint local_id = lid[0];
-    uint num_threads_in_group = tg_size[0];
-
-    // Split threadgroup memory: round constants then MDS constants
-    threadgroup ulong * tg_round_constants = tg_memory;
-    threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-
-    // Cooperatively load all constants into threadgroup memory
-    load_all_constants_tg(local_id, num_threads_in_group, tg_round_constants, tg_mds_constants);
-
-    // Synchronize to ensure all constants are loaded
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Bounds check
     if (thread_id >= uniforms.leaf_count) {
@@ -131,8 +111,7 @@ kernel void poseidon_hash_leaves_linear_threadgroup(
             p2_state[6] = leaf_inputs[offset + 6];
             p2_state[7] = leaf_inputs[offset + 7];
 
-            // Use full threadgroup-cached constants (RC + MDS)
-            poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+            poseidon_permute_const(p2_state);
             offset += 8;
         }
 
@@ -141,7 +120,7 @@ kernel void poseidon_hash_leaves_linear_threadgroup(
             for (uint i = 0; i < remaining; i++) {
                 p2_state[i] = leaf_inputs[offset + i];
             }
-            poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+            poseidon_permute_const(p2_state);
         }
 
         output[output_offset] = static_cast<ulong>(p2_state[0]);
@@ -151,31 +130,20 @@ kernel void poseidon_hash_leaves_linear_threadgroup(
     }
 }
 
-// Kernel to hash internal tree levels with linear layout and full threadgroup caching
-// Uses threadgroup memory for round constants, MDS constants, and child hash data
+// Kernel to hash internal tree levels with linear layout
+// Uses threadgroup memory for child hash data only; constants read from constant address space
 kernel void poseidon_hash_tree_level_linear_threadgroup(
     device ulong * output[[buffer(0)]],
     constant LinearThreadgroupUniforms & uniforms[[buffer(1)]],
-    threadgroup ulong * tg_memory[[threadgroup(0)]],  // Combined: RC + MDS + child cache
+    threadgroup ulong * tg_memory[[threadgroup(0)]],  // Child cache only (8 ulongs per thread)
     uint2 gid[[thread_position_in_grid]],
-    uint2 lid[[thread_position_in_threadgroup]],
-    uint2 tg_size[[threads_per_threadgroup]]
+    uint2 lid[[thread_position_in_threadgroup]]
 ) {
     uint thread_id = gid[1] * uniforms.grid_width + gid[0];
     uint local_id = lid[0];
-    uint num_threads_in_group = tg_size[0];
 
-    // Split threadgroup memory: RC + MDS constants, then child cache
-    // Layout: [0..359] = round constants, [360..371] = MDS, [372+] = child cache
-    threadgroup ulong * tg_round_constants = tg_memory;
-    threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-    threadgroup ulong * shared_children = tg_memory + POSEIDON_RC_TOTAL + MDS_CONST_TOTAL;
-
-    // Cooperatively load all constants into threadgroup memory
-    load_all_constants_tg(local_id, num_threads_in_group, tg_round_constants, tg_mds_constants);
-
-    // Synchronize to ensure all constants are loaded
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Threadgroup memory used for child cache only
+    threadgroup ulong * shared_children = tg_memory;
 
     // Number of nodes at this level across all subtrees
     uint nodes_per_subtree = uniforms.subtree_leaves_len >> uniforms.level;
@@ -260,8 +228,7 @@ kernel void poseidon_hash_tree_level_linear_threadgroup(
     p2_state[10] = 0;
     p2_state[11] = 0;
 
-    // Use full threadgroup-cached constants (RC + MDS)
-    poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+    poseidon_permute_const(p2_state);
 
     // Calculate parent index (where we write)
     uint parent_idx = compute_linear_internal_index_tg(
@@ -281,26 +248,13 @@ kernel void poseidon_hash_tree_level_linear_threadgroup(
 }
 
 // Kernel to compute cap hashes from subtree roots
-// Uses full threadgroup-cached constants (RC + MDS)
+// Constants read from constant address space
 kernel void poseidon_hash_caps_linear_threadgroup(
     device ulong * caps_output[[buffer(0)]],
     device ulong * digests[[buffer(1)]],
     constant LinearThreadgroupUniforms & uniforms[[buffer(2)]],
-    threadgroup ulong * tg_memory[[threadgroup(0)]],  // RC + MDS constants
-    uint gid[[thread_position_in_grid]],
-    uint lid[[thread_position_in_threadgroup]],
-    uint tg_size[[threads_per_threadgroup]]
+    uint gid[[thread_position_in_grid]]
 ) {
-    // Split threadgroup memory: round constants then MDS constants
-    threadgroup ulong * tg_round_constants = tg_memory;
-    threadgroup long * tg_mds_constants = (threadgroup long *)(tg_memory + POSEIDON_RC_TOTAL);
-
-    // Cooperatively load all constants into threadgroup memory
-    load_all_constants_tg(lid, tg_size, tg_round_constants, tg_mds_constants);
-
-    // Synchronize to ensure all constants are loaded
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
     if (gid >= uniforms.subtree_count) {
         return;
     }
@@ -328,8 +282,7 @@ kernel void poseidon_hash_caps_linear_threadgroup(
     p2_state[10] = 0;
     p2_state[11] = 0;
 
-    // Use full threadgroup-cached constants (RC + MDS)
-    poseidon_permute_tg_full(p2_state, tg_round_constants, tg_mds_constants);
+    poseidon_permute_const(p2_state);
 
     // Write cap hash
     uint cap_offset = gid * 4;

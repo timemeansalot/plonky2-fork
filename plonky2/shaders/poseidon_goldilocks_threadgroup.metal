@@ -389,6 +389,149 @@ inline void poseidon_permute_tg_full(thread Fp* p2_state, threadgroup ulong* tg_
     }
 }
 
+// ============================================================
+// Constant-space Poseidon functions (no threadgroup memory)
+// Read from compile-time constant arrays directly
+// ============================================================
+
+// Add round constants from constant-space array
+inline void poseidon_add_rc_const(thread Fp* p2_state, int roundIndex) {
+    uint base = roundIndex * POSEIDON_STATE_SIZE;
+    #pragma unroll
+    for (int i = 0; i < 12; i++) {
+        p2_state[i] = p2_state[i] + Fp(POSEIDON_RC_RAW[base + i]);
+    }
+}
+
+// MDS block operations using constant-space MDS values
+inline long3 block1_const(long3 in) {
+    long3 b1 = long3(MDS_CONST_RAW[0], MDS_CONST_RAW[1], MDS_CONST_RAW[2]);
+    return long3(
+        in.x * b1.x + in.y * b1.z + in.z * b1.y,
+        in.x * b1.y + in.y * b1.x + in.z * b1.z,
+        in.x * b1.z + in.y * b1.y + in.z * b1.x
+    );
+}
+
+inline tg_pair<long3, long3> block2_const(tg_pair<long3, long3> in) {
+    long3 b2a = long3(MDS_CONST_RAW[3], MDS_CONST_RAW[4], MDS_CONST_RAW[5]);
+    long3 b2b = long3(MDS_CONST_RAW[6], MDS_CONST_RAW[7], MDS_CONST_RAW[8]);
+
+    long x0s = in.a.x + in.b.x;
+    long x1s = in.a.y + in.b.y;
+    long x2s = in.a.z + in.b.z;
+    long y0s = b2a.x + b2b.x;
+    long y1s = b2a.y + b2b.y;
+    long y2s = b2a.z + b2b.z;
+
+    long2 m0 = long2(in.a.x * b2a.x, in.b.x * b2b.x);
+    long2 m1 = long2(in.a.y * b2a.z, in.b.y * b2b.z);
+    long2 m2 = long2(in.a.z * b2a.y, in.b.z * b2b.y);
+    long z0r = (m0.x - m0.y) + (x1s * y2s - m1.x - m1.y) + (x2s * y1s - m2.x - m2.y);
+    long z0i = (x0s * y0s - m0.x - m0.y) + (-m1.x + m1.y) + (-m2.x + m2.y);
+
+    m0 = long2(in.a.x * b2a.y, in.b.x * b2b.y);
+    m1 = long2(in.a.y * b2a.x, in.b.y * b2b.x);
+    m2 = long2(in.a.z * b2a.z, in.b.z * b2b.z);
+    long z1r = (m0.x - m0.y) + (m1.x - m1.y) + (x2s * y2s - m2.x - m2.y);
+    long z1i = (x0s * y1s - m0.x - m0.y) + (x1s * y0s - m1.x - m1.y) + (-m2.x + m2.y);
+
+    m0 = long2(in.a.x * b2a.z, in.b.x * b2b.z);
+    m1 = long2(in.a.y * b2a.y, in.b.y * b2b.y);
+    m2 = long2(in.a.z * b2a.x, in.b.z * b2b.x);
+    long z2r = (m0.x - m0.y) + (m1.x - m1.y) + (m2.x - m2.y);
+    long z2i = (x0s * y2s - m0.x - m0.y) + (x1s * y1s - m1.x - m1.y) + (x2s * y0s - m2.x - m2.y);
+
+    return { .a = long3(z0r, z1r, z2r), .b = long3(z0i, z1i, z2i) };
+}
+
+inline long3 block3_const(long3 in) {
+    long3 b3 = long3(MDS_CONST_RAW[9], MDS_CONST_RAW[10], MDS_CONST_RAW[11]);
+    return long3(
+        in.x * b3.x - in.y * b3.z - in.z * b3.y,
+        in.x * b3.y + in.y * b3.x - in.z * b3.z,
+        in.x * b3.z + in.y * b3.y + in.z * b3.x
+    );
+}
+
+inline void mds_multiply_freq_const(unsigned long state[12]) {
+    long4 u0 = fft4_real_tg(ulong4(state[0], state[3], state[6], state[9]));
+    long4 u1 = fft4_real_tg(ulong4(state[1], state[4], state[7], state[10]));
+    long4 u2 = fft4_real_tg(ulong4(state[2], state[5], state[8], state[11]));
+
+    long3 v0 = block1_const(long3(u0.x, u1.x, u2.x));
+    tg_pair<long3, long3> v1 = block2_const({ .a = long3(u0.y, u1.y, u2.y), .b = long3(u0.z, u1.z, u2.z) });
+    long3 v2 = block3_const(long3(u0.w, u1.w, u2.w));
+
+    ulong4 s0 = ifft4_real_tg(long4(v0.x, v1.a.x, v1.b.x, v2.x));
+    ulong4 s1 = ifft4_real_tg(long4(v0.y, v1.a.y, v1.b.y, v2.y));
+    ulong4 s2 = ifft4_real_tg(long4(v0.z, v1.a.z, v1.b.z, v2.z));
+
+    state[0] = s0.x; state[1] = s1.x; state[2] = s2.x;
+    state[3] = s0.y; state[4] = s1.y; state[5] = s2.y;
+    state[6] = s0.z; state[7] = s1.z; state[8] = s2.z;
+    state[9] = s0.w; state[10] = s1.w; state[11] = s2.w;
+}
+
+inline void apply_mds_freq_const(thread Fp* shared, unsigned local_state_offset) {
+    unsigned long state_l[12];
+    unsigned long state_h[12];
+
+    #pragma unroll
+    for (unsigned j = 0; j < 12; j++) {
+        Fp element = shared[local_state_offset + j];
+        unsigned long s = (unsigned long)element;
+        state_l[j] = s & 0xFFFFFFFF;
+        state_h[j] = s >> 32;
+    }
+
+    mds_multiply_freq_const(state_l);
+    mds_multiply_freq_const(state_h);
+
+    u128 s = u128(state_l[0]) + (u128(state_h[0]) << 32);
+    s.accumulate_mul_2_ulong(static_cast<ulong>(shared[0]), 8);
+    ulong reduced = reduce128(s.high, s.low);
+    shared[local_state_offset] = Fp(reduced < GOLDILOCKS_PRIME ? reduced : (reduced - GOLDILOCKS_PRIME));
+
+    #pragma unroll
+    for (unsigned j = 1; j < 12; j++) {
+        s = u128(state_l[j]) + (u128(state_h[j]) << 32);
+        reduced = reduce128(s.high, s.low);
+        shared[local_state_offset + j] = Fp(reduced < GOLDILOCKS_PRIME ? reduced : (reduced - GOLDILOCKS_PRIME));
+    }
+}
+
+inline void poseidon_full_round_const(thread Fp* p2_state, int roundIndex) {
+    poseidon_add_rc_const(p2_state, roundIndex);
+    poseidon_sbox_all_tg(p2_state);
+    apply_mds_freq_const(p2_state, 0);
+}
+
+inline void poseidon_partial_round_const(thread Fp* p2_state, int roundIndex) {
+    poseidon_add_rc_const(p2_state, roundIndex);
+    p2_state[0] = p2_state[0].pow7();
+    apply_mds_freq_const(p2_state, 0);
+}
+
+// Poseidon permutation reading all constants from constant address space
+// No threadgroup memory required
+inline void poseidon_permute_const(thread Fp* p2_state) {
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        poseidon_full_round_const(p2_state, i);
+    }
+
+    #pragma unroll
+    for (int i = 4; i < 26; i++) {
+        poseidon_partial_round_const(p2_state, i);
+    }
+
+    #pragma unroll
+    for (int i = 26; i < 30; i++) {
+        poseidon_full_round_const(p2_state, i);
+    }
+}
+
 // Legacy functions that only use RC caching (for backward compatibility)
 inline void poseidon_full_round_tg(thread Fp* p2_state, int roundIndex, threadgroup ulong* tg_rc) {
     poseidon_add_rc_tg(p2_state, roundIndex, tg_rc);

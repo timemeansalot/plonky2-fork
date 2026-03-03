@@ -7,7 +7,7 @@ use crate::hash::hash_types::HashOut;
 use crate::hash::metal::runtime::MetalRuntime;
 use crate::hash::metal::threadgroup_config::get_merkle_threadgroup_size;
 use crate::hash::metal::utils::{
-    from_buf_raw, get_size_for_count, CoalescedUniforms, LinearUniforms, POSEIDON_CONST_SIZE,
+    from_buf_raw, get_size_for_count, CoalescedUniforms, LinearUniforms,
 };
 
 impl MetalRuntime {
@@ -117,8 +117,8 @@ impl MetalRuntime {
                 depth: 1,
             };
 
-            // Set threadgroup memory for round constants + MDS constants
-            encoder.set_threadgroup_memory_length(0, POSEIDON_CONST_SIZE as u64);
+            // No threadgroup memory needed: constants read from constant address space
+            encoder.set_threadgroup_memory_length(0, 0);
 
             encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
             encoder.end_encoding();
@@ -156,10 +156,9 @@ impl MetalRuntime {
                 &uniforms as *const LinearUniforms as *const core::ffi::c_void,
             );
 
-            // Set threadgroup memory: round constants + MDS constants + child cache (8 ulongs per thread)
+            // Set threadgroup memory: child cache only (8 ulongs per thread), constants read from constant space
             let child_cache_size = (num_threads as usize) * 8 * std::mem::size_of::<u64>();
-            let threadgroup_mem_size = POSEIDON_CONST_SIZE + child_cache_size;
-            encoder.set_threadgroup_memory_length(0, threadgroup_mem_size as u64);
+            encoder.set_threadgroup_memory_length(0, child_cache_size as u64);
 
             let thread_group_size = MTLSize {
                 width: num_threads,
@@ -203,8 +202,8 @@ impl MetalRuntime {
                 depth: 1,
             };
 
-            // Set threadgroup memory for round constants + MDS constants
-            encoder.set_threadgroup_memory_length(0, POSEIDON_CONST_SIZE as u64);
+            // No threadgroup memory needed: constants read from constant address space
+            encoder.set_threadgroup_memory_length(0, 0);
 
             encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
             encoder.end_encoding();
@@ -355,7 +354,8 @@ impl MetalRuntime {
 
             let threadgroup_size =
                 get_merkle_threadgroup_size(subtree_leaves_len, simd_width, max_threads);
-            encoder.set_threadgroup_memory_length(0, POSEIDON_CONST_SIZE as u64);
+            // No threadgroup memory needed: constants read from constant address space
+            encoder.set_threadgroup_memory_length(0, 0);
 
             let tg_size = MTLSize {
                 width: threadgroup_size as u64,
@@ -409,10 +409,10 @@ impl MetalRuntime {
 
                 let threadgroup_size =
                     get_merkle_threadgroup_size(nodes_per_subtree, simd_width, max_threads);
+                // Threadgroup memory: child cache only (8 ulongs per thread), constants read from constant space
                 let child_cache_size =
                     (threadgroup_size as usize) * 8 * std::mem::size_of::<u64>();
-                let threadgroup_memory_size = POSEIDON_CONST_SIZE + child_cache_size;
-                encoder.set_threadgroup_memory_length(0, threadgroup_memory_size as u64);
+                encoder.set_threadgroup_memory_length(0, child_cache_size as u64);
 
                 let tg_size = MTLSize {
                     width: threadgroup_size as u64,
@@ -459,7 +459,8 @@ impl MetalRuntime {
                 &uniforms as *const CoalescedUniforms as *const core::ffi::c_void,
             );
 
-            encoder.set_threadgroup_memory_length(0, POSEIDON_CONST_SIZE as u64);
+            // No threadgroup memory needed: constants read from constant address space
+            encoder.set_threadgroup_memory_length(0, 0);
 
             let grid_size = MTLSize {
                 width: num_caps as u64,
