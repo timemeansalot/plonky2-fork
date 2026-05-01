@@ -129,13 +129,46 @@ The batched path eliminated the dispatch overhead, but still lost to CPU Rayon. 
 
 Conclusion: for this workload, Metal NTT is compute-bound on 64-bit modular arithmetic. CPU Rayon across 8-12 CPU cores is faster than the Apple Silicon GPU path.
 
+## Software Dependencies and Toolchain
+
+The Metal NTT path is macOS/Apple Silicon specific. The benchmark and correctness commands below assume:
+
+- macOS on Apple Silicon
+- Xcode command line tools, including `xcrun`, `metal`, and `metallib`
+- Rust with a recent nightly toolchain
+- Cargo access to crates.io and the git dependencies used by this fork
+- The optional `metal` feature enabled for GPU tests and benchmarks
+
+This branch has `rust-toolchain.toml` pinned to `nightly-2024-01-16`, but one fresh benchmark clone failed with that toolchain because Cargo `1.77.0-nightly` could not parse a cached dependency manifest requiring edition 2024. The benchmark run used:
+
+```bash
+cargo +nightly-2025-12-06 --version
+rustc +nightly-2025-12-06 --version
+```
+
+Use explicit `cargo +nightly-2025-12-06 ...` commands for reproducible local testing on this machine.
+
+The workspace should not point `cryptography_cuda` at a user-specific Cargo cache path. Use a pinned git dependency in the root `Cargo.toml` so other developers can clone and build without editing local paths:
+
+```toml
+cryptography_cuda = { git = "https://github.com/okx/cryptography_cuda.git", rev = "173510160183f3299f4765b30bd4f2c1685353f9" }
+```
+
+If you see a path dependency like this, replace it before benchmarking:
+
+```toml
+cryptography_cuda = { path = "$HOME/.cargo/git/checkouts/cryptography_cuda-<cache-id>/<revision>" }
+```
+
+That form is a machine-local Cargo cache path and is not portable across clones.
+
 ## Correctness Tests
 
 Run all Metal NTT unit tests:
 
 ```bash
-cd /Users/fujie/coding/cysic/20260220/plonky2-fork
-RUSTFLAGS="-Ctarget-cpu=native" cargo test --features metal --release \
+# Run from the repository root.
+RUSTFLAGS="-Ctarget-cpu=native" cargo +nightly-2025-12-06 test --features metal --release \
   -p plonky2 --lib -- hash::metal::ntt --nocapture
 ```
 
@@ -153,8 +186,8 @@ Important tests in `plonky2/src/hash/metal/ntt.rs`:
 Run the end-to-end proof test after temporarily enabling NTT routing:
 
 ```bash
-cd /Users/fujie/coding/cysic/20260220/plonky2-fork
-RUSTFLAGS="-Ctarget-cpu=native" cargo test --features metal --release \
+# Run from the repository root.
+RUSTFLAGS="-Ctarget-cpu=native" cargo +nightly-2025-12-06 test --features metal --release \
   --test metal_proof -- --nocapture --test-threads=1
 ```
 
@@ -163,14 +196,14 @@ RUSTFLAGS="-Ctarget-cpu=native" cargo test --features metal --release \
 Use the d13-d17 fast benchmark to compare configurations:
 
 ```bash
-cd /Users/fujie/coding/cysic/20260220/plonky2-fork
+# Run from the repository root.
 
 # CPU baseline
-RUSTFLAGS="-Ctarget-cpu=native" cargo test --release \
+RUSTFLAGS="-Ctarget-cpu=native" cargo +nightly-2025-12-06 test --release \
   --test bench_degrees -- fast --nocapture --test-threads=1
 
 # Metal path
-RUSTFLAGS="-Ctarget-cpu=native" cargo test --features metal --release \
+RUSTFLAGS="-Ctarget-cpu=native" cargo +nightly-2025-12-06 test --features metal --release \
   --test bench_degrees -- fast --nocapture --test-threads=1
 ```
 
@@ -199,7 +232,7 @@ Use this table format when appending results to `docs/ntt-benchmark-iterations.m
 After editing `ntt_goldilocks.metal`, rebuild the Metal library:
 
 ```bash
-cd /Users/fujie/coding/cysic/20260220/plonky2-fork/plonky2/shaders
+cd plonky2/shaders
 xcrun -sdk macosx metal -c ntt_goldilocks.metal -o ntt_goldilocks.air
 xcrun -sdk macosx metallib ntt_goldilocks.air -o ntt_goldilocks.metallib
 rm ntt_goldilocks.air
