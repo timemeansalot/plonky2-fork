@@ -213,6 +213,61 @@ impl MetalNTT {
         // Just accessing self triggers Lazy initialization
     }
 
+    pub(crate) fn bench_buffer_from_coeffs(&self, coeffs: &[GoldilocksField]) -> Buffer {
+        let buffer_size = std::mem::size_of_val(coeffs);
+        track_allocation(buffer_size);
+        self.device.lock().unwrap().new_buffer_with_data(
+            coeffs.as_ptr() as *const _,
+            buffer_size as u64,
+            MTLResourceOptions::StorageModeShared,
+        )
+    }
+
+    pub(crate) fn bench_forward_batch_ntt(
+        &self,
+        data_buffer: &Buffer,
+        log_n: usize,
+        batch_count: usize,
+    ) {
+        assert!(
+            log_n <= self.max_log_n,
+            "NTT size exceeds maximum supported"
+        );
+        assert!(batch_count > 0, "batch count must be non-zero");
+
+        let n = 1usize << log_n;
+        let expected_bytes = n * batch_count * std::mem::size_of::<GoldilocksField>();
+        assert_eq!(
+            data_buffer.length() as usize,
+            expected_bytes,
+            "Metal benchmark buffer length must equal batch_count * 2^log_n * sizeof(GoldilocksField)"
+        );
+
+        self.batch_ntt_in_place(data_buffer, n, log_n, batch_count, false);
+    }
+
+    pub(crate) fn bench_read_buffer(
+        &self,
+        data_buffer: &Buffer,
+        log_n: usize,
+        batch_count: usize,
+    ) -> Vec<GoldilocksField> {
+        let n = 1usize << log_n;
+        let total_elements = n * batch_count;
+        assert_eq!(
+            data_buffer.length() as usize,
+            total_elements * std::mem::size_of::<GoldilocksField>(),
+            "Metal benchmark buffer length must match requested read size"
+        );
+
+        let ptr = data_buffer.contents() as *const GoldilocksField;
+        unsafe { std::slice::from_raw_parts(ptr, total_elements).to_vec() }
+    }
+
+    pub(crate) fn bench_track_buffer_deallocation(&self, data_buffer: &Buffer) {
+        track_deallocation(data_buffer.length() as usize);
+    }
+
     /// Compute forward NTT (in-place)
     /// Input: coefficients in natural order
     /// Output: evaluations in bit-reversed order (then reordered)
@@ -220,7 +275,10 @@ impl MetalNTT {
         let n = coeffs.len();
         assert!(n.is_power_of_two(), "NTT size must be power of 2");
         let log_n = n.trailing_zeros() as usize;
-        assert!(log_n <= self.max_log_n, "NTT size exceeds maximum supported");
+        assert!(
+            log_n <= self.max_log_n,
+            "NTT size exceeds maximum supported"
+        );
 
         // Copy input to GPU buffer with tracking
         let buffer_size = n * std::mem::size_of::<u64>();
@@ -250,7 +308,10 @@ impl MetalNTT {
         let n = evals.len();
         assert!(n.is_power_of_two(), "INTT size must be power of 2");
         let log_n = n.trailing_zeros() as usize;
-        assert!(log_n <= self.max_log_n, "INTT size exceeds maximum supported");
+        assert!(
+            log_n <= self.max_log_n,
+            "INTT size exceeds maximum supported"
+        );
 
         // Copy input to GPU buffer with tracking
         let buffer_size = n * std::mem::size_of::<u64>();
@@ -712,8 +773,9 @@ impl MetalNTT {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use plonky2_field::types::Field64;
+
+    use super::*;
 
     #[test]
     fn test_pow_mod() {
@@ -839,10 +901,7 @@ mod tests {
                 i, log_n, recovered[i], original[i]
             );
         }
-        println!(
-            "INTT roundtrip log_n={}: all {} values match",
-            log_n, n
-        );
+        println!("INTT roundtrip log_n={}: all {} values match", log_n, n);
     }
 
     #[test]
@@ -1031,11 +1090,9 @@ mod tests {
             assert_eq!(batch_results[b].len(), n);
             for i in 0..n {
                 assert_eq!(
-                    batch_results[b][i],
-                    individual_results[b][i],
+                    batch_results[b][i], individual_results[b][i],
                     "Batch coset NTT mismatch at poly={}, index={}",
-                    b,
-                    i
+                    b, i
                 );
             }
         }
